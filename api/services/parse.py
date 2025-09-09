@@ -1,4 +1,4 @@
-import io
+import io, pathlib
 from typing import List, Dict
 import fitz
 from PIL import Image
@@ -27,3 +27,13 @@ def parse_pdf_bytes(pdf_bytes: bytes):
             text = doc.load_page(i).get_text("text")
         pages.append({"page": i + 1, "text": text})
     return {"num_pages": len(doc), "ocr_pages": ocr_pages, "pages": pages}
+
+def parse_any_bytes(filename: str, data: bytes):
+    ext = pathlib.Path(filename).suffix.lower()
+    if ext == ".pdf":
+        return parse_pdf_bytes(data)
+    if ext in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}:
+        img = Image.open(io.BytesIO(data))
+        text = pytesseract.image_to_string(img, config="--psm 4")
+        return {"num_pages": 1, "ocr_pages": 1, "pages": [{"page": 1, "text": text}]}
+    raise ValueError(f"Unsupported file type: {ext}")

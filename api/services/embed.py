@@ -42,3 +42,10 @@ def embed_texts(texts: List[str]):
         from sentence_transformers import SentenceTransformer
         vecs = model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
         return np.array(vecs, dtype=np.float32)
+
+def embedding_info():
+    backend = (load_config().get("EMBED_BACKEND") or "hf").lower()
+    if backend == "openai":
+        return {"backend": "openai", "model": "text-embedding-3-small", "dim": 1536}
+    else:
+        return {"backend": "hf", "model": "intfloat/e5-small-v2", "dim": 384}
