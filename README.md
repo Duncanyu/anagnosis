@@ -1,67 +1,69 @@
 # Anagnosis
 
-**Intelligent document processing system with cross-course integration and context-aware knowledge synthesis.**
+**Document intelligence system using retrieval-augmented generation for academic research and knowledge synthesis.**
 
 > **⚠️ Work in Progress**: This software is currently under development. The final release will be packaged as a standalone application. Current functionality requires manual setup and may differ from the final product.
 
 ---
 
-## What Makes Anagnosis Different
+## Overview
 
-Anagnosis transforms how students and researchers interact with their document collections by building a unified knowledge base that understands connections across disciplines, courses, and time periods. Unlike traditional document readers or note-taking apps, Anagnosis uses retrieval-augmented generation (RAG) to provide context-aware responses that draw from your entire academic corpus.
+Anagnosis is a RAG-based document processing system that transforms your academic materials into a queryable knowledge base. By indexing documents using vector embeddings and semantic search, it enables natural language queries across your entire document collection with precise source attribution.
 
-### Core Capabilities
+The system processes PDFs, images, and text files to create a personal dataset that understands the relationships between concepts across different sources. Unlike traditional document readers that work with individual files, Anagnosis builds a unified knowledge graph where information from multiple documents can be synthesized to answer complex questions.
 
-**Personal Academic Vault**
-Build a comprehensive, searchable repository of all academic materials. Every document becomes part of an interconnected knowledge graph that grows more valuable with each addition. Query concepts across semesters, find connections between courses, and access insights that span your entire academic journey.
+### RAG Architecture
 
-**Automatic Citation & Source Management**
-Every response includes precise page references and source citations. Generate bibliographies automatically, verify claims against original sources, and maintain academic integrity with built-in fact-checking capabilities. No more manual citation hunting or lost references.
+The core of Anagnosis is its retrieval-augmented generation pipeline:
 
-**Cross-Course Knowledge Integration**
-Discover interdisciplinary connections that traditional tools miss. Ask questions that span multiple courses and receive answers that synthesize insights from economics, psychology, history, and other fields simultaneously. Understand how concepts from different disciplines inform each other.
+1. **Document Ingestion**: Parse and extract text from various file formats
+2. **Semantic Chunking**: Segment documents into contextually meaningful pieces
+3. **Vector Embedding**: Generate dense representations of text chunks
+4. **Knowledge Indexing**: Store embeddings in a searchable vector database
+5. **Query Processing**: Retrieve relevant chunks based on semantic similarity
+6. **Context Assembly**: Combine retrieved passages with conversation history
+7. **Response Generation**: Use LLM to synthesize answers grounded in your documents
 
-**Context-Aware Document Synthesis**
-RAG-powered responses understand the full context of your academic work. Generate study materials that combine insights from multiple sources, create comprehensive research summaries, and produce analysis that considers the broader academic conversation rather than isolated documents.
+This approach ensures that every response is backed by specific sources from your personal document collection, with exact page references and citations.
 
 ---
 
 ## System Architecture
 
 ```mermaid
-graph TB
-    subgraph "Document Input"
-        A[Course Readings<br/>📚 PDFs, Papers]
-        B[Lecture Materials<br/>📄 Slides, Notes]  
-        C[Research Sources<br/>🔬 Articles, Books]
-        D[Personal Documents<br/>📝 Essays, Reports]
+flowchart TD
+    subgraph Input ["Document Input"]
+        A["Course Readings<br/>PDFs, Papers"]
+        B["Lecture Materials<br/>Slides, Notes"]  
+        C["Research Sources<br/>Articles, Books"]
+        D["Personal Documents<br/>Essays, Reports"]
     end
     
-    subgraph "Intelligent Processing"
-        E[Document Parser<br/>🔍 Text + OCR Extraction]
-        F[Semantic Chunker<br/>✂️ Context-Aware Segmentation]
-        G[Knowledge Embedder<br/>🧠 Vector Representations]
-        H[Cross-Reference Builder<br/>🔗 Relationship Mapping]
+    subgraph Process ["RAG Processing Pipeline"]
+        E["Document Parser<br/>Text + OCR Extraction"]
+        F["Semantic Chunker<br/>Context-Aware Segmentation"]
+        G["Vector Embedder<br/>Dense Representations"]
+        H["Knowledge Indexer<br/>FAISS Vector Store"]
     end
     
-    subgraph "Knowledge Base"
-        I[Vector Index<br/>⚡ Semantic Search Engine]
-        J[Citation Database<br/>📖 Source + Page Tracking]
-        K[Context Memory<br/>🧠 Conversation History]
-        L[Concept Graph<br/>🕸️ Cross-Course Connections]
+    subgraph Storage ["Personal Knowledge Base"]
+        I["Vector Index<br/>Semantic Search"]
+        J["Citation Database<br/>Source Tracking"]
+        K["Context Memory<br/>Query History"]
+        L["Document Metadata<br/>Cross-References"]
     end
     
-    subgraph "RAG Query Engine"
-        M[Semantic Retrieval<br/>🎯 Multi-Source Search]
-        N[Context Assembly<br/>📋 Relevant Passage Selection]
-        O[Knowledge Synthesis<br/>💡 Cross-Document Analysis]
-        P[Citation Generation<br/>📚 Automatic Referencing]
+    subgraph Query ["RAG Query Engine"]
+        M["Semantic Retrieval<br/>Similarity Search"]
+        N["Context Assembly<br/>Relevant Passages"]
+        O["Response Generation<br/>LLM Synthesis"]
+        P["Citation Extraction<br/>Source Attribution"]
     end
     
-    subgraph "User Interface"
-        Q[Desktop Application<br/>🖥️ Interactive GUI]
-        R[API Endpoints<br/>🌐 Programmatic Access]
-        S[Structured Responses<br/>📊 Citations + Evidence]
+    subgraph Output ["Response Interface"]
+        Q["Desktop Application<br/>Interactive GUI"]
+        R["REST API<br/>Programmatic Access"]
+        S["Structured Output<br/>Citations + Evidence"]
     end
     
     A --> E
@@ -75,8 +77,8 @@ graph TB
     
     H --> I
     H --> J
-    O --> K
     H --> L
+    O --> K
     
     I --> M
     J --> M
@@ -91,62 +93,69 @@ graph TB
     P --> R
     P --> S
     
-    style A fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
-    style B fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
-    style C fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
-    style D fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
+    classDef inputStyle fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
+    classDef processStyle fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef storageStyle fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef queryStyle fill:#e8f5e8,stroke:#388e3c,stroke-width:2px
+    classDef outputStyle fill:#fce4ec,stroke:#c2185b,stroke-width:2px
     
-    style I fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
-    style J fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
-    style K fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
-    style L fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
-    
-    style Q fill:#e8f5e8,stroke:#388e3c,stroke-width:2px
-    style R fill:#e8f5e8,stroke:#388e3c,stroke-width:2px
-    style S fill:#e8f5e8,stroke:#388e3c,stroke-width:2px
+    class A,B,C,D inputStyle
+    class E,F,G,H processStyle
+    class I,J,K,L storageStyle
+    class M,N,O,P queryStyle
+    class Q,R,S outputStyle
 ```
 
-## Key Features
+## Key Capabilities
 
-### Knowledge Indexing & Academic Vault
-- **Unified Repository**: All academic materials in one searchable system
-- **Persistent Knowledge**: Documents remain accessible across semesters and courses
-- **Semantic Organization**: Content organized by concepts, not just file names
-- **Growth-Oriented**: System becomes more valuable with each document added
+### Personal Dataset Creation
+Transform your document collection into a structured, searchable knowledge base. Each document is processed through the RAG pipeline to extract semantic meaning and establish connections with other materials. The system maintains source attribution throughout, ensuring every piece of information can be traced back to its original context.
 
-### Citation & Source Management
-- **Automatic Tracking**: Every piece of information linked to source and page number
-- **Bibliography Generation**: Export citations in standard academic formats
-- **Fact Verification**: Cross-reference claims against original sources
-- **Quote Extraction**: Relevant passages highlighted with precise attribution
+### Cross-Document Knowledge Synthesis
+Query concepts that span multiple sources simultaneously. The RAG system retrieves relevant passages from across your entire collection, enabling answers that synthesize insights from different courses, authors, and time periods. This cross-document understanding is what distinguishes RAG-based systems from traditional search tools.
 
-### Cross-Course Integration
-- **Interdisciplinary Connections**: Link concepts across different academic fields
-- **Temporal Analysis**: Compare how ideas evolve across different time periods
-- **Thematic Synthesis**: Identify recurring themes across diverse materials
-- **Comparative Analysis**: Examine how different authors approach similar topics
+### Context-Aware Response Generation
+The system maintains conversation history and uses it to provide contextually relevant responses. Previous queries inform current answers, allowing for follow-up questions and deeper exploration of topics. The RAG pipeline ensures responses remain grounded in your specific document collection.
 
-### Context-Aware Generation
-- **RAG Architecture**: Responses grounded in your specific document collection
-- **Multi-Source Synthesis**: Combine insights from multiple documents simultaneously
-- **Contextual Understanding**: System remembers previous queries and builds on them
-- **Evidence-Based Responses**: Every answer supported by specific textual evidence
+### Automatic Source Attribution
+Every generated response includes precise citations with page numbers and source documents. The retrieval component of the RAG system tracks the origin of each piece of information, enabling automatic bibliography generation and fact verification against original sources.
+
+---
+
+## RAG Implementation Details
+
+### Vector Embedding Models
+- **HuggingFace**: `intfloat/e5-small-v2` for local embedding generation
+- **OpenAI**: `text-embedding-3-small` for cloud-based embeddings
+- **Custom Models**: Support for sentence-transformers and other embedding backends
+
+### Retrieval System
+- **FAISS Vector Index**: Efficient similarity search across document embeddings
+- **Semantic Chunking**: Context-aware text segmentation with configurable overlap
+- **Metadata Preservation**: Source tracking and citation information maintained throughout pipeline
+- **Reranking**: Optional reranking models to improve retrieval quality
+
+### Generation Pipeline
+- **Context Assembly**: Intelligent selection of relevant passages for LLM input
+- **Conversation Memory**: Integration of query history for contextual responses
+- **Source Grounding**: Responses constrained to information present in retrieved documents
+- **Citation Generation**: Automatic extraction of supporting quotes with page references
 
 ---
 
 ## Use Cases
 
 ### Academic Research
-Transform literature reviews from manual document scanning to intelligent synthesis. Ask broad questions like "How do different authors define social capital?" and receive comprehensive answers that draw from economics, sociology, and political science sources with full citations.
+Build a comprehensive knowledge base from research papers, course readings, and reference materials. Query broad topics like "theories of social capital" and receive synthesized responses that draw from economics, sociology, and political science sources with full citations.
 
-### Study Material Creation
-Generate study guides that connect concepts across courses. Create exam preparation materials that show how microeconomics principles apply to policy analysis, or how historical events relate to contemporary political theory.
+### Literature Review
+Instead of manually scanning documents for relevant information, use natural language queries to identify key themes, methodologies, and findings across your source collection. The RAG system can identify connections between papers that might not be immediately obvious.
 
-### Essay and Report Writing
-Build arguments supported by evidence from your entire knowledge base. Find supporting quotes, identify counterarguments, and ensure comprehensive coverage of relevant literature with automatic citation formatting.
+### Study Material Generation
+Create study guides and exam preparation materials that connect concepts across different courses. Ask questions like "How do behavioral economics principles apply to public policy?" and receive answers that synthesize insights from multiple disciplines.
 
-### Knowledge Discovery
-Uncover connections you might have missed. Discover how concepts from different courses relate to each other, identify gaps in your understanding, and find unexpected insights that emerge from cross-disciplinary analysis.
+### Citation and Bibliography Management
+Automatically generate citations and bibliographies from your queries. The system tracks all sources used in responses, making it easy to compile reference lists for papers and assignments.
 
 ---
 
@@ -204,12 +213,23 @@ sudo apt-get install tesseract-ocr
 
 ### Building Your Knowledge Base
 
-**Document Ingestion:**
-Upload course readings, research papers, lecture slides, and personal notes. The system automatically extracts text, generates embeddings, and builds cross-references between documents.
+Upload documents through the desktop interface or API. The RAG pipeline automatically:
+- Extracts text using OCR when necessary
+- Segments content into semantic chunks
+- Generates vector embeddings
+- Builds searchable index with source tracking
 
-**Cross-Course Queries:**
+### Querying Your Personal Dataset
+
 ```
 Query: "How do behavioral economics insights relate to public policy design?"
+
+RAG Process:
+1. Query embedding generated
+2. Semantic search across vector index
+3. Relevant chunks retrieved from multiple sources
+4. Context assembled with conversation history
+5. LLM generates response grounded in retrieved content
 
 Response: "Behavioral economics provides several key insights for public policy design, particularly around choice architecture and nudging...
 
@@ -221,20 +241,18 @@ From your Public Policy 205 materials:
 - Implementation challenges often stem from cognitive biases [Policy_Implementation.pdf p.45]
 - Successful programs account for bounded rationality [Case_Studies.pdf p.112]
 
-**Citations:** [Nudge.pdf p.83], [Thinking_Fast_Slow.pdf p.279], [Policy_Implementation.pdf p.45], [Case_Studies.pdf p.112]
+Citations: [Nudge.pdf p.83], [Thinking_Fast_Slow.pdf p.279], [Policy_Implementation.pdf p.45], [Case_Studies.pdf p.112]
 ```
 
 ### API Integration
 
-**Upload Document:**
 ```bash
+# Upload document to RAG system
 curl -X POST "http://localhost:8000/upload/" \
      -H "Content-Type: multipart/form-data" \
      -F "file=@research_paper.pdf"
-```
 
-**Query Knowledge Base:**
-```bash
+# Query personal knowledge base
 curl -X POST "http://localhost:8000/query/" \
      -H "Content-Type: application/json" \
      -d '{"question": "What are the main theories of social capital?", "k": 8}'
@@ -252,40 +270,38 @@ anagnosis/
 │   └── app_qt.py              # Desktop application interface
 ├── api/
 │   ├── main.py                # FastAPI server entry point
-│   ├── core/
-│   │   └── config.py          # Configuration management
 │   ├── routes/
-│   │   ├── upload.py          # Document upload handling
-│   │   ├── query.py           # Query processing
+│   │   ├── upload.py          # Document upload for RAG pipeline
+│   │   ├── query.py           # RAG query processing
 │   │   └── secrets.py         # API key management
 │   └── services/
 │       ├── parse.py           # Document parsing and OCR
 │       ├── chunk.py           # Semantic text chunking
 │       ├── embed.py           # Vector embedding generation
 │       ├── index.py           # FAISS vector indexing
-│       ├── summarize.py       # RAG-based summarization
-│       ├── memory.py          # Conversation context
+│       ├── summarize.py       # RAG-based response generation
+│       ├── memory.py          # Conversation context management
 │       └── aliases.py         # Terminology management
-└── artifacts/                 # Knowledge base storage
+└── artifacts/                 # RAG knowledge base storage
     ├── index.faiss           # Vector search index
     ├── meta.json             # Document metadata
-    ├── chunks.jsonl          # Text segments
-    ├── memory.jsonl          # Query history
+    ├── chunks.jsonl          # Text segments with embeddings
+    ├── memory.jsonl          # Query history for context
     └── doc_summaries.jsonl   # Document summaries
 ```
 
-### Configuration Options
+### RAG Configuration
 
 ```env
-# Backend Selection
+# Embedding Backend for Vector Generation
 EMBED_BACKEND=hf              # hf (HuggingFace) | openai
-LLM_BACKEND=openai            # openai | vllm
-RERANK_BACKEND=hf             # hf | cohere | none
+LLM_BACKEND=openai            # openai | vllm for response generation
+RERANK_BACKEND=hf             # hf | cohere | none for retrieval reranking
 
-# Memory Management
-MEMORY_ENABLED=true           # Enable conversation context
-MEMORY_TOKEN_LIMIT=1200       # Context window size
-MEMORY_FILE_LIMIT_MB=50       # Storage limit
+# RAG Memory Management
+MEMORY_ENABLED=true           # Enable conversation context in RAG
+MEMORY_TOKEN_LIMIT=1200       # Context window for RAG responses
+MEMORY_FILE_LIMIT_MB=50       # Storage limit for conversation history
 
 # API Configuration
 OPENAI_API_KEY=your_key_here
@@ -297,50 +313,52 @@ COHERE_API_KEY=your_cohere_key
 
 | Component | Purpose | Implementation |
 |-----------|---------|----------------|
-| **Document Parser** | Extract text from PDFs and images | PyMuPDF + Tesseract OCR |
-| **Semantic Chunker** | Segment text for optimal retrieval | Context-aware splitting with overlap |
-| **Vector Embedder** | Generate semantic representations | HuggingFace `e5-small-v2` or OpenAI |
-| **Knowledge Index** | Enable fast similarity search | FAISS with metadata preservation |
-| **Context Assembler** | Select relevant passages | Multi-source retrieval with ranking |
-| **Synthesis Engine** | Generate coherent responses | GPT-4 with grounded context |
+| **Document Parser** | Extract text from various formats | PyMuPDF + Tesseract OCR |
+| **Semantic Chunker** | Create meaningful text segments | Context-aware splitting with overlap |
+| **Vector Embedder** | Generate semantic representations | HuggingFace or OpenAI embeddings |
+| **Vector Index** | Enable fast similarity search | FAISS with metadata preservation |
+| **Retrieval System** | Find relevant document chunks | Semantic search with optional reranking |
+| **Context Assembler** | Combine retrieved passages | Multi-source context with conversation history |
+| **Response Generator** | Synthesize grounded answers | GPT-4 or local LLM with retrieved context |
 
 ---
 
 ## Advanced Configuration
 
-### Custom Model Integration
+### Custom RAG Models
 
 ```env
-# Local model deployment
+# Local LLM for response generation
 LLM_BACKEND=vllm
 LLM_OPENAI_BASE=http://localhost:8001/v1
 
-# Custom embedding model
+# Custom embedding model for vector generation
 EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
 ```
 
-### Performance Optimization
+### RAG Performance Tuning
 
 ```env
 # Large document collections
-MEMORY_TOKEN_LIMIT=2000
-MEMORY_FILE_LIMIT_MB=100
+MEMORY_TOKEN_LIMIT=2000       # Larger context window
+MEMORY_FILE_LIMIT_MB=100      # More conversation history
 
 # Resource-constrained environments
-MEMORY_TOKEN_LIMIT=800
-MEMORY_FILE_LIMIT_MB=25
+MEMORY_TOKEN_LIMIT=800        # Smaller context window
+MEMORY_FILE_LIMIT_MB=25       # Limited conversation history
 ```
 
-### Python API Client
+### Python RAG Client
 
 ```python
 import requests
 
-class AnagnosisClient:
+class AnagnosisRAGClient:
     def __init__(self, base_url="http://localhost:8000"):
         self.base_url = base_url
     
-    def upload_document(self, file_path):
+    def add_to_knowledge_base(self, file_path):
+        """Add document to RAG system"""
         with open(file_path, "rb") as f:
             response = requests.post(
                 f"{self.base_url}/upload/",
@@ -348,15 +366,17 @@ class AnagnosisClient:
             )
         return response.json()
     
-    def query_knowledge_base(self, question, k=5):
+    def query_rag_system(self, question, k=5):
+        """Query personal knowledge base using RAG"""
         response = requests.post(
             f"{self.base_url}/query/",
             json={"question": question, "k": k}
         )
         return response.json()
     
-    def build_bibliography(self, topic):
-        result = self.query_knowledge_base(f"Sources related to {topic}")
+    def generate_bibliography(self, topic):
+        """Generate bibliography from RAG responses"""
+        result = self.query_rag_system(f"Sources related to {topic}")
         return result.get("citations", [])
 ```
 
@@ -364,17 +384,24 @@ class AnagnosisClient:
 
 ## Development Status
 
-**Current State**: Functional MVP with core RAG capabilities implemented
+**Current State**: Functional RAG implementation with core capabilities
+
+**RAG Features Implemented:**
+- Document ingestion and vector embedding generation
+- FAISS-based semantic search and retrieval
+- Context-aware response generation with source attribution
+- Conversation memory integration
+- Multiple embedding and LLM backend support
 
 **Known Limitations:**
 - Manual installation and configuration required
 - Local deployment only
 - Performance scales with document collection size
 
-**Planned Enhancements:**
-- Standalone application packaging
-- Enhanced cross-reference detection
-- Advanced citation format support
+**Planned RAG Enhancements:**
+- Advanced retrieval strategies (hybrid search, query expansion)
+- Improved chunk boundary detection
+- Enhanced cross-document relationship modeling
 - Collaborative knowledge base features
 
 ---
@@ -382,15 +409,15 @@ class AnagnosisClient:
 ## Contributing
 
 Contributions are welcome, particularly in areas of:
+- RAG pipeline optimization and retrieval strategies
+- Vector embedding and similarity search improvements
+- Context assembly and response generation enhancements
 - Cross-document relationship detection
-- Citation format standardization
-- Performance optimization for large collections
-- User interface improvements
 
 Please ensure:
-- Code follows existing architectural patterns
+- Code follows existing RAG architecture patterns
 - New features include appropriate tests
-- Documentation reflects changes
+- Documentation reflects RAG implementation details
 - Backward compatibility is maintained
 
 ---
@@ -404,5 +431,5 @@ This project is released under the MIT License. See LICENSE file for details.
 ## Support
 
 - **Issues**: Report bugs and feature requests via GitHub Issues
-- **Documentation**: Refer to code comments and configuration examples
+- **Documentation**: Refer to code comments and RAG implementation examples
 - **API Reference**: Available at `/docs` when running the FastAPI server
