@@ -8,23 +8,21 @@
 
 ## Overview
 
-Anagnosis is a RAG-based document processing system that transforms your academic materials into a queryable knowledge base. By indexing documents using vector embeddings and semantic search, it enables natural language queries across your entire document collection with precise source attribution.
+Anagnosis uses **retrieval-augmented generation (RAG)** to transform academic materials into a queryable knowledge base. Instead of searching individual files, it creates a **personal dataset** that understands relationships between concepts across your entire document collection.
 
-The system processes PDFs, images, and text files to create a personal dataset that understands the relationships between concepts across different sources. Unlike traditional document readers that work with individual files, Anagnosis builds a unified knowledge graph where information from multiple documents can be synthesized to answer complex questions.
+**Key Difference**: Traditional tools work with isolated documents. Anagnosis builds a **unified knowledge graph** where information from multiple sources can be synthesized to answer complex questions with precise citations.
 
-### RAG Architecture
+### RAG Pipeline
 
-The core of Anagnosis is its retrieval-augmented generation pipeline:
+1. **Document Ingestion** → Parse PDFs, images, text files
+2. **Semantic Chunking** → Break into contextually meaningful segments  
+3. **Vector Embedding** → Generate dense representations of content
+4. **Knowledge Indexing** → Store in searchable vector database
+5. **Query Processing** → Retrieve relevant chunks via semantic similarity
+6. **Context Assembly** → Combine passages with conversation history
+7. **Response Generation** → LLM synthesizes grounded answers
 
-1. **Document Ingestion**: Parse and extract text from various file formats
-2. **Semantic Chunking**: Segment documents into contextually meaningful pieces
-3. **Vector Embedding**: Generate dense representations of text chunks
-4. **Knowledge Indexing**: Store embeddings in a searchable vector database
-5. **Query Processing**: Retrieve relevant chunks based on semantic similarity
-6. **Context Assembly**: Combine retrieved passages with conversation history
-7. **Response Generation**: Use LLM to synthesize answers grounded in your documents
-
-This approach ensures that every response is backed by specific sources from your personal document collection, with exact page references and citations.
+**Result**: Every response includes **exact page references** and **source citations** from your personal collection.
 
 ---
 
@@ -109,16 +107,28 @@ flowchart TD
 ## Key Capabilities
 
 ### Personal Dataset Creation
-Transform your document collection into a structured, searchable knowledge base. Each document is processed through the RAG pipeline to extract semantic meaning and establish connections with other materials. The system maintains source attribution throughout, ensuring every piece of information can be traced back to its original context.
+- Transform documents into **structured, searchable knowledge base**
+- RAG pipeline extracts **semantic meaning** and establishes connections
+- **Source attribution** maintained throughout processing
+- Every piece of information **traceable to original context**
 
 ### Cross-Document Knowledge Synthesis
-Query concepts that span multiple sources simultaneously. The RAG system retrieves relevant passages from across your entire collection, enabling answers that synthesize insights from different courses, authors, and time periods. This cross-document understanding is what distinguishes RAG-based systems from traditional search tools.
+- Query concepts **spanning multiple sources** simultaneously
+- RAG retrieves passages from **entire collection**
+- Synthesize insights from **different courses, authors, time periods**
+- **Cross-document understanding** distinguishes RAG from traditional search
 
 ### Context-Aware Response Generation
-The system maintains conversation history and uses it to provide contextually relevant responses. Previous queries inform current answers, allowing for follow-up questions and deeper exploration of topics. The RAG pipeline ensures responses remain grounded in your specific document collection.
+- **Conversation history** informs current responses
+- Enable **follow-up questions** and deeper exploration
+- RAG pipeline keeps responses **grounded in your documents**
+- **Contextually relevant** answers based on previous queries
 
 ### Automatic Source Attribution
-Every generated response includes precise citations with page numbers and source documents. The retrieval component of the RAG system tracks the origin of each piece of information, enabling automatic bibliography generation and fact verification against original sources.
+- **Precise citations** with page numbers and source documents
+- RAG retrieval tracks **origin of each piece of information**
+- **Automatic bibliography generation** and fact verification
+- **Exact page references** for academic integrity
 
 ---
 
@@ -146,16 +156,28 @@ Every generated response includes precise citations with page numbers and source
 ## Use Cases
 
 ### Academic Research
-Build a comprehensive knowledge base from research papers, course readings, and reference materials. Query broad topics like "theories of social capital" and receive synthesized responses that draw from economics, sociology, and political science sources with full citations.
+- Build **comprehensive knowledge base** from research papers and course readings
+- Query broad topics like **"theories of social capital"**
+- Receive **synthesized responses** from economics, sociology, political science sources
+- **Full citations** included automatically
 
 ### Literature Review
-Instead of manually scanning documents for relevant information, use natural language queries to identify key themes, methodologies, and findings across your source collection. The RAG system can identify connections between papers that might not be immediately obvious.
+- **Natural language queries** instead of manual document scanning
+- Identify **key themes, methodologies, findings** across source collection
+- RAG system finds **connections between papers** that aren't immediately obvious
+- **Cross-document insights** emerge from semantic search
 
 ### Study Material Generation
-Create study guides and exam preparation materials that connect concepts across different courses. Ask questions like "How do behavioral economics principles apply to public policy?" and receive answers that synthesize insights from multiple disciplines.
+- Create **study guides** connecting concepts across different courses
+- Ask **"How do behavioral economics principles apply to public policy?"**
+- Receive answers that **synthesize insights from multiple disciplines**
+- **Exam preparation materials** with cross-course connections
 
 ### Citation and Bibliography Management
-Automatically generate citations and bibliographies from your queries. The system tracks all sources used in responses, making it easy to compile reference lists for papers and assignments.
+- **Automatically generate citations** and bibliographies from queries
+- System **tracks all sources** used in responses
+- **Easy compilation** of reference lists for papers and assignments
+- **Academic integrity** maintained with precise source attribution
 
 ---
 
