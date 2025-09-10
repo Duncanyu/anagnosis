@@ -202,18 +202,29 @@ sudo apt-get install tesseract-ocr
 
 2. **Install Dependencies:**
    ```bash
-   pip install fastapi uvicorn pyside6 pymupdf pillow pytesseract faiss-cpu numpy openai transformers torch sentence-transformers markdown
+   pip install fastapi uvicorn pyside6 pymupdf pillow pytesseract faiss-cpu numpy openai transformers torch sentence-transformers markdown keyring pydantic
    ```
 
-3. **Configure Environment:**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your API keys and preferences
+3. **Configure Settings:**
+   The application uses multiple configuration methods:
+   - **GUI Settings**: Use the desktop app's Settings dialog
+   - **Config File**: Create `config.local.json` in the project root
+   - **Environment Variables**: Set API keys and preferences
+   - **System Keyring**: Secure storage for API keys (recommended)
+
+   Example `config.local.json`:
+   ```json
+   {
+     "OPENAI_API_KEY": "your_openai_key_here",
+     "HF_TOKEN": "your_huggingface_token",
+     "EMBED_BACKEND": "hf",
+     "LLM_BACKEND": "openai"
+   }
    ```
 
 4. **Run Application:**
    ```bash
-   # Desktop Interface
+   # Desktop Interface (Recommended)
    python app/app_qt.py
    
    # API Server
@@ -303,24 +314,35 @@ anagnosis/
     └── doc_summaries.jsonl   # Document summaries
 ```
 
-### RAG Configuration
+### Configuration Options
 
-```env
-# Embedding Backend for Vector Generation
-EMBED_BACKEND=hf              # hf (HuggingFace) | openai
-LLM_BACKEND=openai            # openai | vllm for response generation
-RERANK_BACKEND=hf             # hf | cohere | none for retrieval reranking
+The application supports multiple configuration methods with the following priority:
+1. Environment variables (highest priority)
+2. System keyring (secure storage)
+3. Local config file (`config.local.json`)
 
-# RAG Memory Management
-MEMORY_ENABLED=true           # Enable conversation context in RAG
-MEMORY_TOKEN_LIMIT=1200       # Context window for RAG responses
-MEMORY_FILE_LIMIT_MB=50       # Storage limit for conversation history
-
-# API Configuration
-OPENAI_API_KEY=your_key_here
-HF_TOKEN=your_hf_token
-COHERE_API_KEY=your_cohere_key
+**Available Settings:**
+```json
+{
+  "OPENAI_API_KEY": "your_openai_key_here",
+  "HF_TOKEN": "your_huggingface_token",
+  "COHERE_API_KEY": "your_cohere_key",
+  "EMBED_BACKEND": "hf",
+  "LLM_BACKEND": "openai",
+  "RERANK_BACKEND": "hf",
+  "QDRANT_URL": "optional_qdrant_endpoint"
+}
 ```
+
+**Memory and Performance Settings:**
+- `MEMORY_ENABLED`: Enable conversation context (true/false)
+- `MEMORY_TOKEN_LIMIT`: Context window size (default: 1200)
+- `MEMORY_FILE_LIMIT_MB`: Storage limit for conversation history (default: 50)
+- `OPENAI_TPM`: Tokens per minute limit for OpenAI API
+- `OPENAI_RPM`: Requests per minute limit for OpenAI API
+- `ASK_TIME_BUDGET_SEC`: Maximum time for query processing (default: 120)
+- `ASK_BATCH_CHAR_BUDGET`: Character limit per batch (default: 12000)
+- `ASK_MAX_BATCHES`: Maximum number of batches per query (default: 6)
 
 ### RAG Pipeline Components
 
