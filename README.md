@@ -2,7 +2,7 @@
 
 **Document intelligence system using retrieval-augmented generation for academic research and knowledge synthesis.**
 
-> **⚠️ Work in Progress**: This software is currently under development. The final release will be packaged as a standalone application. Current functionality requires manual setup and may differ from the final product.
+> **⚠️ Work in Progress**: This software is currently under development. It will be packaged as a standalone application. Current functionality requires manual setup and may differ from the final product.
 
 ---
 
