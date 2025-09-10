@@ -45,7 +45,6 @@ def _set_keyring(name: str, value: str) -> bool:
 def load_config() -> Dict[str, Optional[str]]:
     cfg = {k: None for k in WANTED_KEYS}
 
-    # 1) environment
     for k in cfg.keys():
         if os.getenv(k):
             cfg[k] = os.getenv(k)

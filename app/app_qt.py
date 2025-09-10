@@ -20,7 +20,7 @@ from api.services import aliases
 from api.core.config import save_secret, present_keys, load_config
 
 
-APP_TITLE = "Reading Agent"
+APP_TITLE = "Anagnosis"
 PREFS_PATH = pathlib.Path("artifacts") / "ui_prefs.json"
 
 def as_bool(x):
@@ -55,11 +55,14 @@ def render_markdown(widget, md_text):
 
 class IngestWorker(QtCore.QThread):
     progress = QtCore.Signal(str)
+    progress_pct = QtCore.Signal(int)
     finished = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
+
     def __init__(self, paths):
         super().__init__()
         self.paths = paths
+
     def run(self):
         try:
             summaries, details, total_chunks = [], [], 0
@@ -67,19 +70,40 @@ class IngestWorker(QtCore.QThread):
             sumi = summarizer_info(); self.progress.emit(f"Summarizer: {sumi['backend']}")
             for p in self.paths:
                 self.progress.emit(f"Loading {p.name}…")
+                self.progress_pct.emit(2)
                 data = p.read_bytes()
+
+                self.progress.emit("Parsing document…")
                 parsed = parse_any_bytes(p.name, data)
+                self.progress_pct.emit(15)
+
                 for page in parsed["pages"]:
                     page["doc_name"] = p.name
-                self.progress.emit(f"Chunking {p.name}…")
+
+                self.progress.emit("Chunking…")
                 chunks = chunk_pages(parsed["pages"])
-                self.progress.emit(f"Indexing {p.name}…")
-                add_chunks(chunks)
+                self.progress_pct.emit(35)
+
+                def embed_cb(done, total):
+                    base = 35
+                    span = 55
+                    pct = base + int(span * (done / max(1, total)))
+                    pct = min(95, max(36, pct))
+                    self.progress_pct.emit(pct)
+
+                self.progress.emit("Embedding and indexing…")
+                add_chunks(chunks, progress_cb=embed_cb)
+                self.progress_pct.emit(96)
+
                 total_chunks += len(chunks)
-                self.progress.emit(f"Summarizing {p.name}…")
+
+                self.progress.emit("Summarizing…")
                 docsum = summarize_document(chunks)
+                self.progress_pct.emit(100)
+
                 summaries.append(f"## {p.name}\n\n{docsum['summary']}")
-                details.append({"file": str(p), "num_pages": parsed["num_pages"], "ocr_pages": parsed["ocr_pages"] , "num_chunks": len(chunks)})
+                details.append({"file": str(p), "num_pages": parsed["num_pages"], "ocr_pages": parsed["ocr_pages"], "num_chunks": len(chunks)})
+
             combined = "\n\n".join(summaries) if summaries else "No documents ingested."
             self.finished.emit({"details": details, "num_docs": len(self.paths), "num_chunks": total_chunks, "doc_summary": combined})
         except Exception as e:
@@ -88,28 +112,30 @@ class IngestWorker(QtCore.QThread):
 
 class AskWorker(QtCore.QThread):
     progress = QtCore.Signal(str)
+    progress_pct = QtCore.Signal(int)
     finished = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
+
     def __init__(self, question, k, history):
         super().__init__()
         self.question = question
         self.k = k
         self.history = history
+
     def run(self):
         try:
             self.progress.emit("Searching index…")
-            hits = search(self.question, k=max(18, self.k))
+            self.progress_pct.emit(15)
+            hits = search(self.question, k=self.k)
             if not hits:
+                self.progress_pct.emit(100)
                 self.finished.emit({"answer": "**No results. Ingest a document first.**", "citations": []})
-                return
-            best = float(hits[0][0]) if hits else 0.0
-            if best < 0.15 and not self.history:
-                msg = "I couldn’t find relevant passages for that in your documents, and conversation memory is off. Rephrase to reference the docs or enable memory in Settings."
-                self.finished.emit({"answer": msg, "citations": []})
                 return
             top_chunks = [h[1] for h in hits]
             self.progress.emit("Summarizing with context…")
+            self.progress_pct.emit(60)
             out = summarize(self.question, top_chunks, history=self.history)
+            self.progress_pct.emit(100)
             self.finished.emit(out)
         except Exception as e:
             tb = traceback.format_exc()
@@ -194,6 +220,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.status = QtWidgets.QStatusBar()
         self.setStatusBar(self.status)
+        self.status_prog = QtWidgets.QProgressBar()
+        self.status_prog.setRange(0, 100)
+        self.status_prog.setValue(0)
+        self.status_prog.setMaximumWidth(240)
+        self.status_prog.hide()
+        self.status.addPermanentWidget(self.status_prog)
+
         self.tabs = QtWidgets.QTabWidget()
         self.setCentralWidget(self.tabs)
 
@@ -362,11 +395,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.selected_paths:
             return
         self.ingest_log.clear()
-        self.progress.show()
-        self.ingest_btn.setEnabled(False)
-        self.pick_btn.setEnabled(False)
+        self.status_prog.show()
+        self.status_prog.setValue(0)
         self.ingest_worker = IngestWorker(self.selected_paths)
         self.ingest_worker.progress.connect(self.ingest_log.appendPlainText)
+        self.ingest_worker.progress_pct.connect(self.status_prog.setValue)
         self.ingest_worker.finished.connect(self.ingest_done)
         self.ingest_worker.failed.connect(self.ingest_fail)
         self.ingest_worker.start()
@@ -375,6 +408,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress.hide()
         self.ingest_btn.setEnabled(True)
         self.pick_btn.setEnabled(True)
+        self.status_prog.hide()
         for d in info.get("details", []):
             self.ingest_log.appendPlainText(f"\n{pathlib.Path(d['file']).name}\nPages: {d['num_pages']} (OCR: {d['ocr_pages']})\nChunks: {d['num_chunks']}")
         self.status.showMessage(f"Ingested {info.get('num_docs',0)} file(s) — chunks: {info.get('num_chunks',0)}")
@@ -387,6 +421,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ingest_btn.setEnabled(True)
         self.pick_btn.setEnabled(True)
         self.ingest_log.appendPlainText("\n[ERROR]\n" + msg)
+        self.status_prog.hide()
         QtWidgets.QMessageBox.critical(self, "Ingest failed", msg)
 
     def run_ask(self):
@@ -396,27 +431,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         render_markdown(self.answer, "_Working…_")
         self.ask_btn_inbar.setEnabled(False)
+        self.status_prog.show()
+        self.status_prog.setValue(0)
         self.ask_worker = AskWorker(q, self.k_spin.value(), history=self.history)
         self.ask_worker.progress.connect(lambda s: self.status.showMessage(s))
+        self.ask_worker.progress_pct.connect(self.status_prog.setValue)
         self.ask_worker.finished.connect(self.ask_done)
         self.ask_worker.failed.connect(self.ask_fail)
         self.ask_worker.start()
-
-def ask_done(self, out):
-    self.ask_btn_inbar.setEnabled(True)
-    text = out.get("answer", "")
-    cites = ", ".join(out.get("citations", []))
-    quotes = out.get("quotes", [])
-    qmd = ""
-    if quotes:
-        qmd = "\n\n### Evidence snippets\n" + "\n".join([f"> {q['quote']}\n>\n> — {q['source']}" for q in quotes])
-    render_markdown(self.answer, text + "\n\n**Citations:** " + cites + qmd)
-    q = self.q_edit.toPlainText().strip()
-    if self.memory_enabled and q and text:
-        mem.append_turn(q, text)
-        mem.prune_file(self.memory_file_limit_mb)
-        self.history = mem.load_recent(self.memory_token_limit)
-    self.status.showMessage("Answer ready")
 
     def ask_done(self, out):
         self.ask_btn_inbar.setEnabled(True)
@@ -433,11 +455,13 @@ def ask_done(self, out):
             mem.prune_file(self.memory_file_limit_mb)
             self.history = mem.load_recent(self.memory_token_limit)
         self.status.showMessage("Answer ready")
+        self.status_prog.hide()
 
     def ask_fail(self, msg):
         self.ask_btn_inbar.setEnabled(True)
         render_markdown(self.answer, "**ERROR**\n\n```\n" + msg + "\n```")
         QtWidgets.QMessageBox.critical(self, "Ask failed", msg)
+        self.status_prog.hide()
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
