@@ -1,4 +1,4 @@
-import sys, pathlib, traceback
+import sys, pathlib, traceback, json, os
 from PySide6 import QtWidgets, QtCore, QtGui
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -12,12 +12,35 @@ except Exception:
 
 from api.services.parse import parse_any_bytes
 from api.services.chunk import chunk_pages
-from api.services.index import add_chunks, search
+from api.services.index import add_chunks, search, clear_index
 from api.services.summarize import summarize, summarize_document, summarizer_info
 from api.services.embed import embedding_info
+from api.services import memory as mem
+from api.services import aliases
 from api.core.config import save_secret, present_keys, load_config
 
+
 APP_TITLE = "Reading Agent"
+PREFS_PATH = pathlib.Path("artifacts") / "ui_prefs.json"
+
+def as_bool(x):
+    s = str(x).strip().lower()
+    return s in {"1","true","yes","on","t","y"}
+
+def read_prefs():
+    try:
+        if PREFS_PATH.exists():
+            return json.loads(PREFS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+def write_prefs(d):
+    try:
+        PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PREFS_PATH.write_text(json.dumps(d, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 def render_markdown(widget, md_text):
     if mdlib:
@@ -34,22 +57,14 @@ class IngestWorker(QtCore.QThread):
     progress = QtCore.Signal(str)
     finished = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
-
     def __init__(self, paths):
         super().__init__()
         self.paths = paths
-
     def run(self):
         try:
-            summaries = []
-            details = []
-            total_chunks = 0
-
-            emb = embedding_info()
-            self.progress.emit(f"Embedding: {emb['backend']} ({emb['model']})")
-            sumi = summarizer_info()
-            self.progress.emit(f"Summarizer: {sumi['backend']}")
-
+            summaries, details, total_chunks = [], [], 0
+            emb = embedding_info(); self.progress.emit(f"Embedding: {emb['backend']} ({emb['model']})")
+            sumi = summarizer_info(); self.progress.emit(f"Summarizer: {sumi['backend']}")
             for p in self.paths:
                 self.progress.emit(f"Loading {p.name}…")
                 data = p.read_bytes()
@@ -64,8 +79,7 @@ class IngestWorker(QtCore.QThread):
                 self.progress.emit(f"Summarizing {p.name}…")
                 docsum = summarize_document(chunks)
                 summaries.append(f"## {p.name}\n\n{docsum['summary']}")
-                details.append({"file": str(p), "num_pages": parsed["num_pages"], "ocr_pages": parsed["ocr_pages"], "num_chunks": len(chunks)})
-
+                details.append({"file": str(p), "num_pages": parsed["num_pages"], "ocr_pages": parsed["ocr_pages"] , "num_chunks": len(chunks)})
             combined = "\n\n".join(summaries) if summaries else "No documents ingested."
             self.finished.emit({"details": details, "num_docs": len(self.paths), "num_chunks": total_chunks, "doc_summary": combined})
         except Exception as e:
@@ -76,19 +90,22 @@ class AskWorker(QtCore.QThread):
     progress = QtCore.Signal(str)
     finished = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
-
     def __init__(self, question, k, history):
         super().__init__()
         self.question = question
         self.k = k
         self.history = history
-
     def run(self):
         try:
             self.progress.emit("Searching index…")
-            hits = search(self.question, k=self.k)
+            hits = search(self.question, k=max(18, self.k))
             if not hits:
                 self.finished.emit({"answer": "**No results. Ingest a document first.**", "citations": []})
+                return
+            best = float(hits[0][0]) if hits else 0.0
+            if best < 0.15 and not self.history:
+                msg = "I couldn’t find relevant passages for that in your documents, and conversation memory is off. Rephrase to reference the docs or enable memory in Settings."
+                self.finished.emit({"answer": msg, "citations": []})
                 return
             top_chunks = [h[1] for h in hits]
             self.progress.emit("Summarizing with context…")
@@ -104,6 +121,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.setWindowTitle("Settings")
         self.setModal(True)
         cfg = load_config()
+        prefs = read_prefs()
         form = QtWidgets.QFormLayout()
         self.openai = QtWidgets.QLineEdit(cfg.get("OPENAI_API_KEY") or "")
         self.openai.setEchoMode(QtWidgets.QLineEdit.Password)
@@ -115,14 +133,29 @@ class SettingsDialog(QtWidgets.QDialog):
         self.llm_backend = QtWidgets.QComboBox()
         self.llm_backend.addItems(["openai","vllm"])
         self.llm_backend.setCurrentText((cfg.get("LLM_BACKEND") or "openai").lower())
+        self.mem_enable = QtWidgets.QCheckBox()
+        self.mem_enable.setChecked(as_bool(prefs.get("MEMORY_ENABLED", cfg.get("MEMORY_ENABLED") or "0")))
+        self.mem_tokens = QtWidgets.QSpinBox()
+        self.mem_tokens.setRange(0, 100000)
+        self.mem_tokens.setSingleStep(100)
+        self.mem_tokens.setValue(int(prefs.get("MEMORY_TOKEN_LIMIT", cfg.get("MEMORY_TOKEN_LIMIT") or 1200)))
+        self.mem_mb = QtWidgets.QSpinBox()
+        self.mem_mb.setRange(1, 2048)
+        self.mem_mb.setSingleStep(5)
+        self.mem_mb.setValue(int(prefs.get("MEMORY_FILE_LIMIT_MB", cfg.get("MEMORY_FILE_LIMIT_MB") or 50)))
         form.addRow("OPENAI_API_KEY", self.openai)
         form.addRow("HF_TOKEN", self.hf)
         form.addRow("Embedding backend", self.embed_backend)
         form.addRow("LLM backend", self.llm_backend)
+        form.addRow("Memory enabled", self.mem_enable)
+        form.addRow("Memory token limit", self.mem_tokens)
+        form.addRow("Memory file limit (MB)", self.mem_mb)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.save); buttons.rejected.connect(self.reject)
-        lay = QtWidgets.QVBoxLayout(self); lay.addLayout(form); lay.addWidget(buttons)
-
+        buttons.accepted.connect(self.save)
+        buttons.rejected.connect(self.reject)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.addLayout(form)
+        lay.addWidget(buttons)
     def save(self):
         if self.openai.text().strip():
             save_secret("OPENAI_API_KEY", self.openai.text().strip(), prefer="keyring")
@@ -130,6 +163,14 @@ class SettingsDialog(QtWidgets.QDialog):
             save_secret("HF_TOKEN", self.hf.text().strip(), prefer="keyring")
         save_secret("EMBED_BACKEND", self.embed_backend.currentText(), prefer="file")
         save_secret("LLM_BACKEND", self.llm_backend.currentText(), prefer="file")
+        prefs = read_prefs()
+        prefs["MEMORY_ENABLED"] = "true" if self.mem_enable.isChecked() else "false"
+        prefs["MEMORY_TOKEN_LIMIT"] = int(self.mem_tokens.value())
+        prefs["MEMORY_FILE_LIMIT_MB"] = int(self.mem_mb.value())
+        write_prefs(prefs)
+        os.environ["MEMORY_ENABLED"] = prefs["MEMORY_ENABLED"]
+        os.environ["MEMORY_TOKEN_LIMIT"] = str(prefs["MEMORY_TOKEN_LIMIT"])
+        os.environ["MEMORY_FILE_LIMIT_MB"] = str(prefs["MEMORY_FILE_LIMIT_MB"])
         self.accept()
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -137,27 +178,65 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
         self.resize(1000, 720)
+
         tb = self.addToolBar("Main")
-        act_settings = QtGui.QAction("Settings", self); act_settings.triggered.connect(self.open_settings); tb.addAction(act_settings)
-        self.status = QtWidgets.QStatusBar(); self.setStatusBar(self.status)
-        self.tabs = QtWidgets.QTabWidget(); self.setCentralWidget(self.tabs)
+        act_settings = QtGui.QAction("Settings", self)
+        act_settings.triggered.connect(self.open_settings)
+        tb.addAction(act_settings)
+        def do_clear():
+            if QtWidgets.QMessageBox.question(self, "Clear index", "Delete all indexed chunks?") == QtWidgets.QMessageBox.Yes:
+                clear_index()
+                self.ingest_log.appendPlainText("\nIndex cleared.")
+                self.status.showMessage("Index cleared")
+        act_clear = QtGui.QAction("Clear Index", self)
+        act_clear.triggered.connect(do_clear)
+        tb.addAction(act_clear)
 
-        ingest = QtWidgets.QWidget(); v1 = QtWidgets.QVBoxLayout(ingest)
-        self.pick_btn = QtWidgets.QPushButton("Choose files…"); self.pick_btn.clicked.connect(self.choose_files)
-        self.ingest_btn = QtWidgets.QPushButton("Ingest"); self.ingest_btn.clicked.connect(self.ingest_docs); self.ingest_btn.setEnabled(False)
-        row = QtWidgets.QHBoxLayout(); row.addWidget(self.pick_btn); row.addWidget(self.ingest_btn)
+        self.status = QtWidgets.QStatusBar()
+        self.setStatusBar(self.status)
+        self.tabs = QtWidgets.QTabWidget()
+        self.setCentralWidget(self.tabs)
+
+        ingest = QtWidgets.QWidget()
+        v1 = QtWidgets.QVBoxLayout(ingest)
+        self.pick_btn = QtWidgets.QPushButton("Choose files…")
+        self.pick_btn.clicked.connect(self.choose_files)
+        self.ingest_btn = QtWidgets.QPushButton("Ingest")
+        self.ingest_btn.clicked.connect(self.ingest_docs)
+        self.ingest_btn.setEnabled(False)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.pick_btn)
+        row.addWidget(self.ingest_btn)
         self.sel_label = QtWidgets.QLabel("No files selected.")
-        self.ingest_log = QtWidgets.QPlainTextEdit(); self.ingest_log.setReadOnly(True)
-        self.progress = QtWidgets.QProgressBar(); self.progress.setRange(0,0)
-        v1.addLayout(row); v1.addWidget(self.sel_label); v1.addWidget(self.ingest_log); v1.addWidget(self.progress); self.progress.hide()
+        self.ingest_log = QtWidgets.QPlainTextEdit()
+        self.ingest_log.setReadOnly(True)
+        self.progress = QtWidgets.QProgressBar()
+        self.progress.setRange(0,0)
+        v1.addLayout(row)
+        v1.addWidget(self.sel_label)
+        v1.addWidget(self.ingest_log)
+        v1.addWidget(self.progress)
+        self.progress.hide()
 
-        ask = QtWidgets.QWidget(); v2 = QtWidgets.QVBoxLayout(ask)
-        self.q_edit = QtWidgets.QPlainTextEdit(); self.q_edit.setPlaceholderText("Ask anything about your readings…")
-        self.k_spin = QtWidgets.QSpinBox(); self.k_spin.setRange(1, 20); self.k_spin.setValue(6)
-        self.ask_btn = QtWidgets.QPushButton("Ask"); self.ask_btn.clicked.connect(self.run_ask)
-        controls = QtWidgets.QHBoxLayout(); controls.addWidget(QtWidgets.QLabel("Top-k:")); controls.addWidget(self.k_spin); controls.addStretch(1); controls.addWidget(self.ask_btn)
-        self.answer = QtWidgets.QTextEdit(); self.answer.setReadOnly(True)
-        v2.addWidget(self.q_edit); v2.addLayout(controls); v2.addWidget(self.answer)
+        ask = QtWidgets.QWidget()
+        v2 = QtWidgets.QVBoxLayout(ask)
+
+        self.input_bar = self._build_input_bar()
+
+        self.k_spin = QtWidgets.QSpinBox()
+        self.k_spin.setRange(1, 20)
+        self.k_spin.setValue(6)
+        controls = QtWidgets.QHBoxLayout()
+        controls.addWidget(QtWidgets.QLabel("Top-k:"))
+        controls.addWidget(self.k_spin)
+        controls.addStretch(1)
+
+        self.answer = QtWidgets.QTextEdit()
+        self.answer.setReadOnly(True)
+
+        v2.addWidget(self.input_bar)
+        v2.addLayout(controls)
+        v2.addWidget(self.answer)
 
         self.tabs.addTab(ingest, "Ingest")
         self.tabs.addTab(ask, "Ask")
@@ -165,23 +244,114 @@ class MainWindow(QtWidgets.QMainWindow):
         self.selected_paths = []
         self.ingest_worker = None
         self.ask_worker = None
-        self.history = []; self.history_limit = 8
+
+        cfg = load_config()
+        prefs = read_prefs()
+        self.memory_enabled = as_bool(prefs.get("MEMORY_ENABLED", os.environ.get("MEMORY_ENABLED", cfg.get("MEMORY_ENABLED") or "0")))
+        self.memory_token_limit = int(prefs.get("MEMORY_TOKEN_LIMIT", os.environ.get("MEMORY_TOKEN_LIMIT", cfg.get("MEMORY_TOKEN_LIMIT") or 1200)))
+        self.memory_file_limit_mb = int(prefs.get("MEMORY_FILE_LIMIT_MB", os.environ.get("MEMORY_FILE_LIMIT_MB", cfg.get("MEMORY_FILE_LIMIT_MB") or 50)))
+        self.history = mem.load_recent(self.memory_token_limit) if self.memory_enabled else []
+        self.history_limit = 1000
+        self.adjust_input_height()
         self.update_key_status()
+        
+    def _build_input_bar(self):
+        wrap = QtWidgets.QFrame()
+        wrap.setObjectName("InputWrap")
+        wrap.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        wrap.setLineWidth(1)
+        wrap.setStyleSheet("""
+    #InputWrap { border: 1px solid rgba(255,255,255,0.18); background: palette(base); }
+    QToolButton#AskInBar { border: 1px solid rgba(255,255,255,0.18); border-radius: 4px; padding: 0; min-width: 28px; min-height: 24px; }
+    """)
+
+        lay = QtWidgets.QHBoxLayout(wrap)
+        lay.setContentsMargins(8, 6, 6, 6)
+        lay.setSpacing(6)
+
+        self.q_edit = QtWidgets.QTextEdit()
+        self.q_edit.setObjectName("QEdit")
+        self.q_edit.setFrameStyle(QtWidgets.QFrame.NoFrame)
+        self.q_edit.setPlaceholderText("Ask anything about your readings…")
+        self.q_edit.setWordWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.q_edit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
+        self.q_edit.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.q_edit.installEventFilter(self)
+
+        self.ask_btn_inbar = QtWidgets.QToolButton()
+        self.ask_btn_inbar.setObjectName("AskInBar")
+        self.ask_btn_inbar.setText("↑")
+        self.ask_btn_inbar.setCursor(QtCore.Qt.PointingHandCursor)
+        self.ask_btn_inbar.clicked.connect(self.run_ask)
+        self.ask_btn_inbar.setToolTip("Ask")
+
+        lay.addWidget(self.q_edit, 1)
+        lay.addWidget(self.ask_btn_inbar, 0)
+
+        self.q_min_lines, self.q_max_lines = 1, 5
+        self._last_q_height = 0
+        self.q_resize_timer = QtCore.QTimer(self)
+        self.q_resize_timer.setSingleShot(True)
+        self.q_resize_timer.setInterval(15)
+        self.q_resize_timer.timeout.connect(self.adjust_input_height)
+        self.q_edit.textChanged.connect(lambda: self.q_resize_timer.start())
+        self.q_edit.document().documentLayout().documentSizeChanged.connect(lambda _: self.q_resize_timer.start())
+
+        return wrap
+
+
+    def _position_send_button(self):
+        r = self.q_edit.viewport().rect()
+        m = 6
+        x = r.right() - m - self.ask_btn_inbar.width()
+        y = r.bottom() - m - self.ask_btn_inbar.height()
+        self.ask_btn_inbar.move(x, y)
+
+    def eventFilter(self, obj, event):
+        if obj is self.q_edit and event.type() == QtCore.QEvent.KeyPress:
+            if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                if event.modifiers() & QtCore.Qt.ShiftModifier:
+                    return False
+                self.run_ask()
+                return True
+        return super().eventFilter(obj, event)
+
+    def adjust_input_height(self):
+        fm = self.q_edit.fontMetrics()
+        line_h = fm.lineSpacing()
+        min_h = self.q_min_lines * line_h + 12
+        max_h = self.q_max_lines * line_h + 12
+        doc_h = int(self.q_edit.document().documentLayout().documentSize().height()) + 8
+        h = max(min_h, min(doc_h, max_h))
+        if abs(h - getattr(self, "_last_q_height", 0)) > 1:
+            self._last_q_height = h
+            self.q_edit.setFixedHeight(h)
+            self.input_bar.setFixedHeight(h + 12)
+
 
     def open_settings(self):
         dlg = SettingsDialog(self)
-        if dlg.exec(): self.update_key_status()
+        if dlg.exec():
+            cfg = load_config()
+            prefs = read_prefs()
+            self.memory_enabled = as_bool(prefs.get("MEMORY_ENABLED", os.environ.get("MEMORY_ENABLED", cfg.get("MEMORY_ENABLED") or "0")))
+            self.memory_token_limit = int(prefs.get("MEMORY_TOKEN_LIMIT", os.environ.get("MEMORY_TOKEN_LIMIT", cfg.get("MEMORY_TOKEN_LIMIT") or 1200)))
+            self.memory_file_limit_mb = int(prefs.get("MEMORY_FILE_LIMIT_MB", os.environ.get("MEMORY_FILE_LIMIT_MB", cfg.get("MEMORY_FILE_LIMIT_MB") or 50)))
+            self.history = mem.load_recent(self.memory_token_limit) if self.memory_enabled else []
+            self.update_key_status()
 
     def update_key_status(self):
         status = present_keys()
         bits = []
         bits.append(f"OPENAI: {'✓' if status.get('OPENAI_API_KEY') else '×'}")
         bits.append(f"HF: {'✓' if status.get('HF_TOKEN') else '×'}")
+        bits.append(f"Memory: {'on' if self.memory_enabled else 'off'}")
         self.status.showMessage(" | ".join(bits))
 
     def choose_files(self):
         fns, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Choose files", "", "PDF and Images (*.pdf *.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp)")
-        if not fns: return
+        if not fns:
+            return
         self.selected_paths = [pathlib.Path(fn) for fn in fns]
         names = ", ".join(p.name for p in self.selected_paths[:3])
         more = "" if len(self.selected_paths) <= 3 else f" …+{len(self.selected_paths)-3} more"
@@ -189,9 +359,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ingest_btn.setEnabled(True)
 
     def ingest_docs(self):
-        if not self.selected_paths: return
-        self.ingest_log.clear(); self.progress.show()
-        self.ingest_btn.setEnabled(False); self.pick_btn.setEnabled(False)
+        if not self.selected_paths:
+            return
+        self.ingest_log.clear()
+        self.progress.show()
+        self.ingest_btn.setEnabled(False)
+        self.pick_btn.setEnabled(False)
         self.ingest_worker = IngestWorker(self.selected_paths)
         self.ingest_worker.progress.connect(self.ingest_log.appendPlainText)
         self.ingest_worker.finished.connect(self.ingest_done)
@@ -199,7 +372,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ingest_worker.start()
 
     def ingest_done(self, info):
-        self.progress.hide(); self.ingest_btn.setEnabled(True); self.pick_btn.setEnabled(True)
+        self.progress.hide()
+        self.ingest_btn.setEnabled(True)
+        self.pick_btn.setEnabled(True)
         for d in info.get("details", []):
             self.ingest_log.appendPlainText(f"\n{pathlib.Path(d['file']).name}\nPages: {d['num_pages']} (OCR: {d['ocr_pages']})\nChunks: {d['num_chunks']}")
         self.status.showMessage(f"Ingested {info.get('num_docs',0)} file(s) — chunks: {info.get('num_chunks',0)}")
@@ -208,45 +383,67 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.setCurrentIndex(1)
 
     def ingest_fail(self, msg):
-        self.progress.hide(); self.ingest_btn.setEnabled(True); self.pick_btn.setEnabled(True)
+        self.progress.hide()
+        self.ingest_btn.setEnabled(True)
+        self.pick_btn.setEnabled(True)
         self.ingest_log.appendPlainText("\n[ERROR]\n" + msg)
         QtWidgets.QMessageBox.critical(self, "Ingest failed", msg)
 
     def run_ask(self):
         q = self.q_edit.toPlainText().strip()
         if not q:
-            QtWidgets.QMessageBox.information(self, "Ask", "Type a question first."); return
-        render_markdown(self.answer, "_Working…_"); self.ask_btn.setEnabled(False)
+            QtWidgets.QMessageBox.information(self, "Ask", "Type a question first.")
+            return
+        render_markdown(self.answer, "_Working…_")
+        self.ask_btn_inbar.setEnabled(False)
         self.ask_worker = AskWorker(q, self.k_spin.value(), history=self.history)
         self.ask_worker.progress.connect(lambda s: self.status.showMessage(s))
         self.ask_worker.finished.connect(self.ask_done)
         self.ask_worker.failed.connect(self.ask_fail)
         self.ask_worker.start()
 
+def ask_done(self, out):
+    self.ask_btn_inbar.setEnabled(True)
+    text = out.get("answer", "")
+    cites = ", ".join(out.get("citations", []))
+    quotes = out.get("quotes", [])
+    qmd = ""
+    if quotes:
+        qmd = "\n\n### Evidence snippets\n" + "\n".join([f"> {q['quote']}\n>\n> — {q['source']}" for q in quotes])
+    render_markdown(self.answer, text + "\n\n**Citations:** " + cites + qmd)
+    q = self.q_edit.toPlainText().strip()
+    if self.memory_enabled and q and text:
+        mem.append_turn(q, text)
+        mem.prune_file(self.memory_file_limit_mb)
+        self.history = mem.load_recent(self.memory_token_limit)
+    self.status.showMessage("Answer ready")
+
     def ask_done(self, out):
-        self.ask_btn.setEnabled(True)
+        self.ask_btn_inbar.setEnabled(True)
         text = out.get("answer", "")
         cites = ", ".join(out.get("citations", []))
         quotes = out.get("quotes", [])
         qmd = ""
         if quotes:
             qmd = "\n\n### Evidence snippets\n" + "\n".join([f"> {q['quote']}\n>\n> — {q['source']}" for q in quotes])
-        md = text + "\n\n**Citations:** " + cites + qmd
-        render_markdown(self.answer, md)
-        self.history.append({"q": self.q_edit.toPlainText().strip(), "a": text})
-        if len(self.history) > self.history_limit:
-            self.history = self.history[-self.history_limit:]
+        render_markdown(self.answer, text + "\n\n**Citations:** " + cites + qmd)
+        q = self.q_edit.toPlainText().strip()
+        if self.memory_enabled and q and text:
+            mem.append_turn(q, text)
+            mem.prune_file(self.memory_file_limit_mb)
+            self.history = mem.load_recent(self.memory_token_limit)
         self.status.showMessage("Answer ready")
 
-
     def ask_fail(self, msg):
-        self.ask_btn.setEnabled(True)
+        self.ask_btn_inbar.setEnabled(True)
         render_markdown(self.answer, "**ERROR**\n\n```\n" + msg + "\n```")
         QtWidgets.QMessageBox.critical(self, "Ask failed", msg)
 
 def main():
-    app = QtWidgets.QApplication(sys.argv); app.setApplicationName(APP_TITLE)
-    w = MainWindow(); w.show()
+    app = QtWidgets.QApplication(sys.argv)
+    app.setApplicationName(APP_TITLE)
+    w = MainWindow()
+    w.show()
     sys.exit(app.exec())
 
 if __name__ == "__main__":

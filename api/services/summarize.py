@@ -1,11 +1,14 @@
 from typing import List, Dict
 from api.core.config import load_config
 from api.services.embed import embed_texts
+from api.services.aliases import load_aliases
 import os, re, json, time, pathlib
 import numpy as np
 
 TEMPLATE = """You are a study assistant. Answer the question using ONLY the provided context.
-Return the answer in Markdown. Use short bullet points. Cite sources like [FileName.pdf p.3] or [FileName.pdf p.3–4].
+Start with a single bold sentence that directly answers the question. Then, if helpful, add short bullet points. Do not start the response with a bullet. Cite sources like [FileName.pdf p.3] or [FileName.pdf p.3–4].
+Important terms to anchor on: {terms}
+If none of the important terms appear in the context, reply exactly with: Not found in sources.
 
 Question:
 {q}
@@ -33,12 +36,19 @@ _HF_PIPE = None
 _HF_NAME = None
 
 def _normalize_md(s: str):
+    import re
     s = s.strip().replace("\u00a0", " ")
     m = re.match(r"^\s*```[\w\-]*\s*\n?(.*?)\n?\s*```\s*$", s, flags=re.S)
     if m:
         s = m.group(1).strip()
     s = re.sub(r"(?m)^\s*[–—•]\s+", "- ", s)
-    return s
+    lines = [ln.rstrip() for ln in s.splitlines()]
+    i = 0
+    while i < len(lines) and lines[i].strip() == "":
+        i += 1
+    if i < len(lines) and lines[i].lstrip().startswith("- "):
+        lines[i] = lines[i].lstrip()[2:].strip()
+    return "\n".join(lines).strip()
 
 def _fmt_source(c: Dict):
     doc = c.get("doc_name") or "Unknown.pdf"
@@ -94,7 +104,8 @@ def _split_sentences(t: str):
     parts = re.split(r"(?<=[\.\!\?])\s+(?=[A-Z0-9(])", t)
     return [p.strip() for p in parts if p.strip()]
 
-def _extract_quotes(question: str, chunks: List[Dict], max_quotes: int = 5, window: int = 1):
+def _extract_quotes(question, chunks, max_quotes=5, window=1):
+    kws = set(_keywords(question))
     sents = []
     meta = []
     for c in chunks:
@@ -107,7 +118,17 @@ def _extract_quotes(question: str, chunks: List[Dict], max_quotes: int = 5, wind
     qv = embed_texts([question])
     sv = embed_texts(sents)
     sims = (qv @ sv.T).flatten()
-    order = np.argsort(-sims)
+    lex = []
+    for s in sents:
+        s_low = s.lower()
+        matches = sum(1 for k in kws if k in s_low)
+        lex.append(matches)
+    import numpy as np
+    lex = np.array(lex, dtype=float)
+    if lex.max() > 0:
+        lex = lex / lex.max()
+    comb = 0.85 * sims + 0.15 * lex
+    order = np.argsort(-comb)
     seen = set()
     quotes = []
     for idx in order:
@@ -126,13 +147,23 @@ def _extract_quotes(question: str, chunks: List[Dict], max_quotes: int = 5, wind
 
 def summarize(question: str, top_chunks: List[Dict], history: List[Dict] = None):
     cfg = load_config()
+    terms = ", ".join(_keywords(question))
     ctx = _format_ctx(top_chunks)
-    prompt = TEMPLATE.format(q=question, ctx=ctx)
+    prompt = TEMPLATE.format(q=question, ctx=ctx, terms=terms)
+
+    kw = set(_keywords(question))
+    has_kw = any(any(k in (c["text"].lower()) for k in kw) for c in top_chunks) if kw else True
+    if not has_kw:
+        return {"answer": "Not found in sources.", "citations": [], "quotes": []}
 
     if cfg.get("OPENAI_API_KEY"):
         from openai import OpenAI
         client = OpenAI(api_key=cfg["OPENAI_API_KEY"])
-        messages = [{"role": "system", "content": "You extract key ideas and cite pages. Return Markdown."}]
+        prefs = _pref_string()
+        sysmsg = "You extract key ideas and cite pages. Return Markdown."
+        if prefs:
+            sysmsg += " " + prefs
+        messages = [{"role": "system", "content": sysmsg}]
         if history:
             for turn in history[-8:]:
                 if turn.get("q"):
@@ -191,3 +222,22 @@ def summarize_document(chunks: List[Dict]):
         f.write(json.dumps({"ts": int(time.time()), "keywords": [], "formulas": [], "summary": summary[:40000]}, ensure_ascii=False) + "\n")
 
     return {"summary": summary, "keywords": [], "formulas": []}
+
+def _keywords(q):
+    import re
+    q = q.lower()
+    q = re.sub(r"[^a-z0-9\s]", " ", q)
+    toks = [w for w in q.split() if len(w) >= 4 and w not in {"what","which","this","that","about","were","does","with","from","your","their","into","there","when","where","many","show","give","tell","list"}]
+    expand = {"curriculum":{"course","syllabus","program"}, "resume":{"cv"}}
+    out = set(toks)
+    for w in list(out):
+        if w in expand:
+            out |= expand[w]
+    return list(out)
+
+def _pref_string():
+    a = load_aliases()
+    if not a:
+        return ""
+    pairs = [f"{k} -> {v}" for k,v in a.items()]
+    return "Use user-preferred terminology: " + "; ".join(pairs) + "."
