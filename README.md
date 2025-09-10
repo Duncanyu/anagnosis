@@ -196,7 +196,7 @@ sudo apt-get install tesseract-ocr
 
 1. **Clone Repository:**
    ```bash
-   git clone https://github.com/Duncanyu/reading-agent.git
+   git clone https://github.com/Duncanyu/anagnosis.git
    cd anagnosis
    ```
 
