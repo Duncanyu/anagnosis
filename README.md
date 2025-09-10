@@ -29,73 +29,64 @@ Anagnosis uses **retrieval-augmented generation (RAG)** to transform academic ma
 ## System Architecture
 
 ```mermaid
-flowchart TD
-    subgraph Input ["Document Input"]
-        A["Course Readings<br/>PDFs, Papers"]
-        B["Lecture Materials<br/>Slides, Notes"]  
-        C["Research Sources<br/>Articles, Books"]
-        D["Personal Documents<br/>Essays, Reports"]
+flowchart LR
+    subgraph Input [" "]
+        direction TB
+        A[Course Readings<br/>PDFs, Papers]
+        B[Lecture Materials<br/>Slides, Notes]  
+        C[Research Sources<br/>Articles, Books]
+        D[Personal Documents<br/>Essays, Reports]
     end
     
-    subgraph Process ["RAG Processing Pipeline"]
-        E["Document Parser<br/>Text + OCR Extraction"]
-        F["Semantic Chunker<br/>Context-Aware Segmentation"]
-        G["Vector Embedder<br/>Dense Representations"]
-        H["Knowledge Indexer<br/>FAISS Vector Store"]
+    subgraph Process [" "]
+        direction TB
+        E[Document Parser<br/>Text + OCR]
+        F[Semantic Chunker<br/>Context Segmentation]
+        G[Vector Embedder<br/>Dense Representations]
+        H[Knowledge Indexer<br/>FAISS Vector Store]
+        
+        E --> F
+        F --> G
+        G --> H
     end
     
-    subgraph Storage ["Personal Knowledge Base"]
-        I["Vector Index<br/>Semantic Search"]
-        J["Citation Database<br/>Source Tracking"]
-        K["Context Memory<br/>Query History"]
-        L["Document Metadata<br/>Cross-References"]
+    subgraph Storage [" "]
+        direction TB
+        I[Vector Index<br/>Semantic Search]
+        J[Citation Database<br/>Source Tracking]
+        K[Context Memory<br/>Query History]
+        L[Document Metadata<br/>Cross-References]
     end
     
-    subgraph Query ["RAG Query Engine"]
-        M["Semantic Retrieval<br/>Similarity Search"]
-        N["Context Assembly<br/>Relevant Passages"]
-        O["Response Generation<br/>LLM Synthesis"]
-        P["Citation Extraction<br/>Source Attribution"]
+    subgraph Query [" "]
+        direction TB
+        M[Semantic Retrieval<br/>Similarity Search]
+        N[Context Assembly<br/>Relevant Passages]
+        O[Response Generation<br/>LLM Synthesis]
+        P[Citation Extraction<br/>Source Attribution]
+        
+        M --> N
+        N --> O
+        O --> P
     end
     
-    subgraph Output ["Response Interface"]
-        Q["Desktop Application<br/>Interactive GUI"]
-        R["REST API<br/>Programmatic Access"]
-        S["Structured Output<br/>Citations + Evidence"]
+    subgraph Output [" "]
+        direction TB
+        Q[Desktop Application<br/>Interactive GUI]
+        R[REST API<br/>Programmatic Access]
+        S[Structured Output<br/>Citations + Evidence]
     end
     
-    A --> E
-    B --> E
-    C --> E
-    D --> E
+    Input -.-> Process
+    Process -.-> Storage
+    Storage -.-> Query
+    Query -.-> Output
     
-    E --> F
-    F --> G
-    G --> H
-    
-    H --> I
-    H --> J
-    H --> L
-    O --> K
-    
-    I --> M
-    J --> M
-    K --> M
-    L --> M
-    
-    M --> N
-    N --> O
-    O --> P
-    
-    P --> Q
-    P --> R
-    P --> S
-    
-    classDef inputStyle fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
-    classDef processStyle fill:#fff3e0,stroke:#f57c00,stroke-width:2px
-    classDef storageStyle fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
-    classDef queryStyle fill:#e8f5e8,stroke:#388e3c,stroke-width:2px
-    classDef outputStyle fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    classDef inputStyle fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#000
+    classDef processStyle fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#000
+    classDef storageStyle fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#000
+    classDef queryStyle fill:#e8f5e8,stroke:#388e3c,stroke-width:2px,color:#000
+    classDef outputStyle fill:#fce4ec,stroke:#c2185b,stroke-width:2px,color:#000
     
     class A,B,C,D inputStyle
     class E,F,G,H processStyle
