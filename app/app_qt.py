@@ -13,7 +13,7 @@ except Exception:
 from api.services.parse import parse_any_bytes
 from api.services.chunk import chunk_pages
 from api.services.index import add_chunks, search, clear_index
-from api.services.summarize import summarize, summarize_document, summarizer_info
+from api.services.summarize import summarize, summarize_document, summarizer_info, summarize_batched
 from api.services.embed import embedding_info
 from api.services import memory as mem
 from api.services import aliases
@@ -63,6 +63,13 @@ class IngestWorker(QtCore.QThread):
         super().__init__()
         self.paths = paths
 
+    def _log(self, s):
+        try:
+            print(s, flush=True)
+        except Exception:
+            pass
+        self.progress.emit(s)
+
     def run(self):
         try:
             summaries, details, total_chunks = [], [], 0
@@ -74,8 +81,32 @@ class IngestWorker(QtCore.QThread):
                 data = p.read_bytes()
 
                 self.progress.emit("Parsing document…")
-                parsed = parse_any_bytes(p.name, data)
+                parsed = parse_any_bytes(p.name, data, progress_cb=self.progress.emit)
                 self.progress_pct.emit(15)
+
+                ocr_list = parsed.get("ocr_page_numbers") or []
+                suspect_list = parsed.get("suspect_pages") or []
+                if ocr_list:
+                    head = ", ".join(str(x) for x in ocr_list[:20])
+                    tail = " ..." if len(ocr_list) > 20 else ""
+                    self._log(f"OCR pages: [{head}]{tail}")
+                else:
+                    self._log("OCR pages: []")
+                if suspect_list:
+                    head = ", ".join(str(x) for x in suspect_list[:20])
+                    tail = " ..." if len(suspect_list) > 20 else ""
+                    self._log(f"Suspect pages: [{head}]{tail}")
+                else:
+                    self._log("Suspect pages: []")
+                    
+                salv_list = parsed.get("salvaged_pages") or []
+
+                if salv_list:
+                    head = ", ".join(str(x) for x in salv_list[:20])
+                    tail = " ..." if len(salv_list) > 20 else ""
+                    self._log(f"Salvaged pages: [{head}]{tail}")
+                else:
+                    self._log("Salvaged pages: []")
 
                 for page in parsed["pages"]:
                     page["doc_name"] = p.name
@@ -102,7 +133,14 @@ class IngestWorker(QtCore.QThread):
                 self.progress_pct.emit(100)
 
                 summaries.append(f"## {p.name}\n\n{docsum['summary']}")
-                details.append({"file": str(p), "num_pages": parsed["num_pages"], "ocr_pages": parsed["ocr_pages"], "num_chunks": len(chunks)})
+                details.append({
+                    "file": str(p),
+                    "num_pages": parsed["num_pages"],
+                    "ocr_pages": parsed["ocr_pages"],
+                    "ocr_page_numbers": ocr_list,
+                    "suspect_pages": suspect_list,
+                    "num_chunks": len(chunks)
+                })
 
             combined = "\n\n".join(summaries) if summaries else "No documents ingested."
             self.finished.emit({"details": details, "num_docs": len(self.paths), "num_chunks": total_chunks, "doc_summary": combined})
@@ -126,15 +164,28 @@ class AskWorker(QtCore.QThread):
         try:
             self.progress.emit("Searching index…")
             self.progress_pct.emit(15)
-            hits = search(self.question, k=self.k)
+            pool = int(os.environ.get("ASK_CANDIDATES","300"))
+            hits = search(self.question, k=pool)
+            self.progress.emit(f"Hits: {len(hits)}")
             if not hits:
                 self.progress_pct.emit(100)
                 self.finished.emit({"answer": "**No results. Ingest a document first.**", "citations": []})
                 return
-            top_chunks = [h[1] for h in hits]
-            self.progress.emit("Summarizing with context…")
+            chs = []
+            for h in hits:
+                try:
+                    sc, ch = h[0], h[1]
+                except Exception:
+                    sc, ch = 0.0, h[1] if isinstance(h, (list, tuple)) and len(h) > 1 else h
+                x = dict(ch)
+                x["_score"] = float(sc) if sc is not None else 0.0
+                chs.append(x)
+            self.progress.emit("Summarizing in batches…")
             self.progress_pct.emit(60)
-            out = summarize(self.question, top_chunks, history=self.history)
+            tb = int(os.environ.get("ASK_TIME_BUDGET_SEC","120"))
+            mb = int(os.environ.get("ASK_MAX_BATCHES","6"))
+            exh = os.environ.get("ASK_EXHAUSTIVE","false").lower() in {"1","true","yes","on"}
+            out = summarize_batched(self.question, chs, history=self.history, progress_cb=lambda s: self.progress.emit(s), max_batches=mb, time_budget_sec=tb, exhaustive=exh)
             self.progress_pct.emit(100)
             self.finished.emit(out)
         except Exception as e:
@@ -149,33 +200,105 @@ class SettingsDialog(QtWidgets.QDialog):
         cfg = load_config()
         prefs = read_prefs()
         form = QtWidgets.QFormLayout()
+
         self.openai = QtWidgets.QLineEdit(cfg.get("OPENAI_API_KEY") or "")
         self.openai.setEchoMode(QtWidgets.QLineEdit.Password)
         self.hf = QtWidgets.QLineEdit(cfg.get("HF_TOKEN") or "")
         self.hf.setEchoMode(QtWidgets.QLineEdit.Password)
+
+        self.openai_model = QtWidgets.QLineEdit(load_config().get("OPENAI_CHAT_MODEL") or os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini"))
+        self.hf_name = QtWidgets.QLineEdit(load_config().get("HF_LLM_NAME") or os.environ.get("HF_LLM_NAME", "TinyLlama/TinyLlama-1.1B-Chat-v1.0"))
+
         self.embed_backend = QtWidgets.QComboBox()
         self.embed_backend.addItems(["hf","openai"])
         self.embed_backend.setCurrentText((cfg.get("EMBED_BACKEND") or "hf").lower())
+
         self.llm_backend = QtWidgets.QComboBox()
         self.llm_backend.addItems(["openai","vllm"])
         self.llm_backend.setCurrentText((cfg.get("LLM_BACKEND") or "openai").lower())
+
         self.mem_enable = QtWidgets.QCheckBox()
         self.mem_enable.setChecked(as_bool(prefs.get("MEMORY_ENABLED", cfg.get("MEMORY_ENABLED") or "0")))
+
         self.mem_tokens = QtWidgets.QSpinBox()
         self.mem_tokens.setRange(0, 100000)
         self.mem_tokens.setSingleStep(100)
         self.mem_tokens.setValue(int(prefs.get("MEMORY_TOKEN_LIMIT", cfg.get("MEMORY_TOKEN_LIMIT") or 1200)))
+
         self.mem_mb = QtWidgets.QSpinBox()
         self.mem_mb.setRange(1, 2048)
         self.mem_mb.setSingleStep(5)
         self.mem_mb.setValue(int(prefs.get("MEMORY_FILE_LIMIT_MB", cfg.get("MEMORY_FILE_LIMIT_MB") or 50)))
+
+        self.openai_tpm = QtWidgets.QSpinBox()
+        self.openai_tpm.setRange(0, 900000)
+        self.openai_tpm.setSingleStep(10000)
+        self.openai_tpm.setValue(int(prefs.get("OPENAI_TPM", os.environ.get("OPENAI_TPM", "0"))))
+
+        self.openai_rpm = QtWidgets.QSpinBox()
+        self.openai_rpm.setRange(0, 5000)
+        self.openai_rpm.setSingleStep(100)
+        self.openai_rpm.setValue(int(prefs.get("OPENAI_RPM", os.environ.get("OPENAI_RPM", "0"))))
+
+        self.ask_time = QtWidgets.QSpinBox()
+        self.ask_time.setRange(10, 18000)
+        self.ask_time.setSingleStep(10)
+        self.ask_time.setValue(int(prefs.get("ASK_TIME_BUDGET_SEC", os.environ.get("ASK_TIME_BUDGET_SEC", "120"))))
+
+        self.ask_exhaustive = QtWidgets.QCheckBox()
+        self.ask_exhaustive.setChecked(as_bool(prefs.get("ASK_EXHAUSTIVE", os.environ.get("ASK_EXHAUSTIVE","false"))))
+
+        self.ask_candidates = QtWidgets.QSpinBox()
+        self.ask_candidates.setRange(10, 5000)
+        self.ask_candidates.setSingleStep(10)
+        self.ask_candidates.setValue(int(prefs.get("ASK_CANDIDATES", os.environ.get("ASK_CANDIDATES","300"))))
+
+        self.ask_reranker = QtWidgets.QComboBox()
+        self.ask_reranker.addItems(["off","minilm","bge-m3","bge-base","bge-large"])
+        self.ask_reranker.setCurrentText((prefs.get("ASK_RERANKER", os.environ.get("ASK_RERANKER","off"))).lower())
+
+        self.ask_batch_chars = QtWidgets.QSpinBox()
+        self.ask_batch_chars.setRange(2000, 60000)
+        self.ask_batch_chars.setSingleStep(1000)
+        self.ask_batch_chars.setValue(int(prefs.get("ASK_BATCH_CHAR_BUDGET", os.environ.get("ASK_BATCH_CHAR_BUDGET", "12000"))))
+
+        self.ask_max_batches = QtWidgets.QSpinBox()
+        self.ask_max_batches.setRange(1, 50)
+        self.ask_max_batches.setSingleStep(1)
+        self.ask_max_batches.setValue(int(prefs.get("ASK_MAX_BATCHES", os.environ.get("ASK_MAX_BATCHES", "6"))))
+
+        for le in [self.openai, self.hf, self.openai_model, self.hf_name]:
+            le.setClearButtonEnabled(True)
+            le.setMinimumWidth(300)
+            le.setDragEnabled(True)
+
+        self.mem_tokens.setAccelerated(True)
+        self.mem_mb.setAccelerated(True)
+        self.openai_tpm.setAccelerated(True)
+        self.openai_rpm.setAccelerated(True)
+        self.ask_time.setAccelerated(True)
+        self.ask_batch_chars.setAccelerated(True)
+        self.ask_max_batches.setAccelerated(True)
+        self.ask_candidates.setAccelerated(True)
+
         form.addRow("OPENAI_API_KEY", self.openai)
         form.addRow("HF_TOKEN", self.hf)
+        form.addRow("OpenAI chat model", self.openai_model)
+        form.addRow("HF LLM name", self.hf_name)
         form.addRow("Embedding backend", self.embed_backend)
         form.addRow("LLM backend", self.llm_backend)
         form.addRow("Memory enabled", self.mem_enable)
         form.addRow("Memory token limit", self.mem_tokens)
         form.addRow("Memory file limit (MB)", self.mem_mb)
+        form.addRow("OPENAI_TPM", self.openai_tpm)
+        form.addRow("OPENAI_RPM", self.openai_rpm)
+        form.addRow("Ask time budget (sec)", self.ask_time)
+        form.addRow("Ask batch char budget", self.ask_batch_chars)
+        form.addRow("Ask max batches", self.ask_max_batches)
+        form.addRow("Exhaustive sweep", self.ask_exhaustive)
+        form.addRow("Candidate pool size", self.ask_candidates)
+        form.addRow("Reranker", self.ask_reranker)
+
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.save)
         buttons.rejected.connect(self.reject)
@@ -189,14 +312,34 @@ class SettingsDialog(QtWidgets.QDialog):
             save_secret("HF_TOKEN", self.hf.text().strip(), prefer="keyring")
         save_secret("EMBED_BACKEND", self.embed_backend.currentText(), prefer="file")
         save_secret("LLM_BACKEND", self.llm_backend.currentText(), prefer="file")
+        save_secret("OPENAI_CHAT_MODEL", self.openai_model.text().strip() or "gpt-4o-mini", prefer="file")
+        save_secret("HF_LLM_NAME", self.hf_name.text().strip(), prefer="file")
         prefs = read_prefs()
         prefs["MEMORY_ENABLED"] = "true" if self.mem_enable.isChecked() else "false"
         prefs["MEMORY_TOKEN_LIMIT"] = int(self.mem_tokens.value())
         prefs["MEMORY_FILE_LIMIT_MB"] = int(self.mem_mb.value())
+        prefs["OPENAI_TPM"] = int(self.openai_tpm.value())
+        prefs["OPENAI_RPM"] = int(self.openai_rpm.value())
+        prefs["ASK_TIME_BUDGET_SEC"] = int(self.ask_time.value())
+        prefs["ASK_BATCH_CHAR_BUDGET"] = int(self.ask_batch_chars.value())
+        prefs["ASK_MAX_BATCHES"] = int(self.ask_max_batches.value())
+        prefs["ASK_EXHAUSTIVE"] = "true" if self.ask_exhaustive.isChecked() else "false"
+        prefs["ASK_CANDIDATES"] = int(self.ask_candidates.value())
+        prefs["ASK_RERANKER"] = self.ask_reranker.currentText()
         write_prefs(prefs)
+        os.environ["ASK_EXHAUSTIVE"] = prefs["ASK_EXHAUSTIVE"]
+        os.environ["ASK_CANDIDATES"] = str(prefs["ASK_CANDIDATES"])
+        os.environ["ASK_RERANKER"] = prefs["ASK_RERANKER"]
         os.environ["MEMORY_ENABLED"] = prefs["MEMORY_ENABLED"]
         os.environ["MEMORY_TOKEN_LIMIT"] = str(prefs["MEMORY_TOKEN_LIMIT"])
+        os.environ["OPENAI_CHAT_MODEL"] = self.openai_model.text().strip() or "gpt-4o-mini"
+        os.environ["HF_LLM_NAME"] = self.hf_name.text().strip()
         os.environ["MEMORY_FILE_LIMIT_MB"] = str(prefs["MEMORY_FILE_LIMIT_MB"])
+        os.environ["OPENAI_TPM"] = str(prefs["OPENAI_TPM"])
+        os.environ["OPENAI_RPM"] = str(prefs["OPENAI_RPM"])
+        os.environ["ASK_TIME_BUDGET_SEC"] = str(prefs["ASK_TIME_BUDGET_SEC"])
+        os.environ["ASK_BATCH_CHAR_BUDGET"] = str(prefs["ASK_BATCH_CHAR_BUDGET"])
+        os.environ["ASK_MAX_BATCHES"] = str(prefs["ASK_MAX_BATCHES"])
         self.accept()
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -257,8 +400,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.input_bar = self._build_input_bar()
 
         self.k_spin = QtWidgets.QSpinBox()
-        self.k_spin.setRange(1, 20)
-        self.k_spin.setValue(6)
+        self.k_spin.setRange(1, 500)
+        self.k_spin.setValue(10)
         controls = QtWidgets.QHBoxLayout()
         controls.addWidget(QtWidgets.QLabel("Top-k:"))
         controls.addWidget(self.k_spin)
@@ -411,6 +554,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_prog.hide()
         for d in info.get("details", []):
             self.ingest_log.appendPlainText(f"\n{pathlib.Path(d['file']).name}\nPages: {d['num_pages']} (OCR: {d['ocr_pages']})\nChunks: {d['num_chunks']}")
+            op = d.get("ocr_page_numbers") or []
+            sp = d.get("suspect_pages") or []
+            sv = d.get("salvaged_pages") or []
+            if sv:
+                head = ", ".join(str(x) for x in sv[:20])
+                tail = " ..." if len(sv) > 20 else ""
+                self.ingest_log.appendPlainText(f"Salvaged pages: [{head}]{tail}")
+            else:
+                self.ingest_log.appendPlainText("Salvaged pages: []")
+            if op:
+                head = ", ".join(str(x) for x in op[:20])
+                tail = " ..." if len(op) > 20 else ""
+                self.ingest_log.appendPlainText(f"OCR pages: [{head}]{tail}")
+            else:
+                self.ingest_log.appendPlainText("OCR pages: []")
+            if sp:
+                head = ", ".join(str(x) for x in sp[:20])
+                tail = " ..." if len(sp) > 20 else ""
+                self.ingest_log.appendPlainText(f"Suspect pages: [{head}]{tail}")
+            else:
+                self.ingest_log.appendPlainText("Suspect pages: []")
         self.status.showMessage(f"Ingested {info.get('num_docs',0)} file(s) — chunks: {info.get('num_chunks',0)}")
         md = "### Auto-summary\n\n" + info.get("doc_summary","")
         render_markdown(self.answer, md)
