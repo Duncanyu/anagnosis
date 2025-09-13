@@ -1,4 +1,4 @@
-import sys, pathlib, traceback, json, os
+import sys, pathlib, traceback, json, os, shutil, re
 from PySide6 import QtWidgets, QtCore, QtGui
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -13,7 +13,7 @@ except Exception:
 from api.services.parse import parse_any_bytes
 from api.services.chunk import chunk_pages
 from api.services.index import add_chunks, search, clear_index
-from api.services.summarize import summarize, summarize_document, summarizer_info, summarize_batched
+from api.services.summarize import summarize, summarize_document, summarizer_info, summarize_batched, summarize_all_formulas, is_formula_query
 from api.services.embed import embedding_info
 from api.services import memory as mem
 from api.services import aliases
@@ -159,33 +159,58 @@ class AskWorker(QtCore.QThread):
         self.question = question
         self.k = k
         self.history = history
-
+        
     def run(self):
         try:
             self.progress.emit("Searching index…")
-            self.progress_pct.emit(15)
+            self.progress_pct.emit(10)
+
             pool = int(os.environ.get("ASK_CANDIDATES","300"))
-            hits = search(self.question, k=pool)
+            self._pc = 12
+            def s_cb(msg):
+                self.progress.emit(msg)
+                self._pc = min(55, self._pc + 3)
+                self.progress_pct.emit(self._pc)
+
+            tb = int(os.environ.get("ASK_TIME_BUDGET_SEC","120"))
+            st = int(os.environ.get("SEARCH_TIMEOUT_SEC", str(max(10, min(tb//2, 30)))))
+
+            hits = search(self.question, k=pool, progress_cb=s_cb, timeout_sec=st, pool=pool)
             self.progress.emit(f"Hits: {len(hits)}")
             if not hits:
                 self.progress_pct.emit(100)
                 self.finished.emit({"answer": "**No results. Ingest a document first.**", "citations": []})
                 return
-            chs = []
-            for h in hits:
-                try:
-                    sc, ch = h[0], h[1]
-                except Exception:
-                    sc, ch = 0.0, h[1] if isinstance(h, (list, tuple)) and len(h) > 1 else h
-                x = dict(ch)
-                x["_score"] = float(sc) if sc is not None else 0.0
-                chs.append(x)
-            self.progress.emit("Summarizing in batches…")
-            self.progress_pct.emit(60)
-            tb = int(os.environ.get("ASK_TIME_BUDGET_SEC","120"))
-            mb = int(os.environ.get("ASK_MAX_BATCHES","6"))
-            exh = os.environ.get("ASK_EXHAUSTIVE","false").lower() in {"1","true","yes","on"}
-            out = summarize_batched(self.question, chs, history=self.history, progress_cb=lambda s: self.progress.emit(s), max_batches=mb, time_budget_sec=tb, exhaustive=exh)
+
+            top_chunks = [h[1] for h in hits]
+
+            if is_formula_query(self.question):
+                self.progress.emit("Formula mode: extracting all formulas in scope…")
+                total = len(top_chunks)
+                def p_cb(msg):
+                    self.progress.emit(msg)
+                    m = re.search(r"(\d+)\s*/\s*(\d+)", msg)
+                    if m:
+                        done = int(m.group(1))
+                        pct = 20 + int(70 * (done / max(1, total)))
+                        pct = max(20, min(95, pct))
+                        self.progress_pct.emit(pct)
+                out = summarize_all_formulas(self.question, top_chunks, progress_cb=p_cb)
+            else:
+                self.progress.emit("Summarizing with context…")
+                self.progress_pct.emit(60)
+                mb = int(os.environ.get("ASK_MAX_BATCHES","6"))
+                exh = os.environ.get("ASK_EXHAUSTIVE","false").lower() in {"1","true","yes","on"}
+                chs = []
+                for h in hits:
+                    try:
+                        sc, ch = h[0], h[1]
+                    except Exception:
+                        sc, ch = 0.0, h[1] if isinstance(h, (list, tuple)) and len(h) > 1 else h
+                    x = dict(ch); x["_score"] = float(sc) if sc is not None else 0.0
+                    chs.append(x)
+                out = summarize_batched(self.question, chs, history=self.history, progress_cb=lambda s: self.progress.emit(s), max_batches=mb, time_budget_sec=tb, exhaustive=exh)
+
             self.progress_pct.emit(100)
             self.finished.emit(out)
         except Exception as e:
@@ -357,6 +382,56 @@ class MainWindow(QtWidgets.QMainWindow):
                 clear_index()
                 self.ingest_log.appendPlainText("\nIndex cleared.")
                 self.status.showMessage("Index cleared")
+        def do_clear_cache():
+            if QtWidgets.QMessageBox.question(self, "Clear cache", "Delete all __pycache__ folders and .pyc files under the project?") == QtWidgets.QMessageBox.Yes:
+                n_dirs = 0
+                n_files = 0
+                try:
+                    for root, dirs, files in os.walk(str(ROOT)):
+                        for d in list(dirs):
+                            if d == "__pycache__":
+                                p = os.path.join(root, d)
+                                shutil.rmtree(p, ignore_errors=True)
+                                n_dirs += 1
+                        for f in files:
+                            if f.endswith(".pyc") or f.endswith(".pyo"):
+                                p = os.path.join(root, f)
+                                try:
+                                    os.remove(p)
+                                    n_files += 1
+                                except Exception:
+                                    pass
+                    self.ingest_log.appendPlainText(f"\nCache cleared. Removed {n_dirs} __pycache__ dirs and {n_files} bytecode files.")
+                    self.status.showMessage("Cache cleared")
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(self, "Clear cache", str(e))
+
+        def do_clear_memory():
+            if QtWidgets.QMessageBox.question(self, "Clear memory", "Erase saved Q/A memory on disk and reset in-app history?") != QtWidgets.QMessageBox.Yes:
+                return
+            try:
+                self.history = []
+                try:
+                    if hasattr(mem, "clear"):
+                        mem.clear()
+                        cleared = True
+                    else:
+                        cleared = False
+                except Exception:
+                    cleared = False
+                msg = "Memory cleared" if cleared else "Couldn't clear memory."
+                self.ingest_log.appendPlainText("\n" + msg)
+                self.status.showMessage(msg)
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Clear memory", str(e))
+
+        act_cache = QtGui.QAction("Clear Cache", self)
+        act_cache.triggered.connect(do_clear_cache)
+        tb.addAction(act_cache)
+
+        act_mem = QtGui.QAction("Clear Memory", self)
+        act_mem.triggered.connect(do_clear_memory)
+        tb.addAction(act_mem)
         act_clear = QtGui.QAction("Clear Index", self)
         act_clear.triggered.connect(do_clear)
         tb.addAction(act_clear)

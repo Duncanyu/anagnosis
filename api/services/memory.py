@@ -51,3 +51,8 @@ def prune_file(max_mb=50):
     keep = list(reversed(keep))
     with MEM_PATH.open("w", encoding="utf-8") as f:
         f.write("\n".join(keep) + ("\n" if keep else ""))
+        
+def clear():
+    MEM_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with MEM_PATH.open("w", encoding="utf-8") as f:
+        pass
