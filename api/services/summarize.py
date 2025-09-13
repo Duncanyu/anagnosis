@@ -40,6 +40,8 @@ ASK_EXHAUSTIVE_DEFAULT = (os.getenv("ASK_EXHAUSTIVE","0").lower() in {"1","true"
 ASK_CANDIDATES_DEFAULT = int(os.getenv("ASK_CANDIDATES","300"))
 RERANKER_NAME_DEFAULT = os.getenv("ASK_RERANKER","off").lower()
 RERANK_TOP_N = int(os.getenv("ASK_RERANK_TOP_N","200"))
+FORMULA_Q_WORDS = {"formula","formulas","identity","identities","equation","equations","rule","rules","laws","law"}
+FORMULA_HINT_RX = re.compile(r"(=|≈|≅|≤|≥|±|∝|∑|∏|∫|√|∞|d/dx|∂|∇|\be\^|\bdy/dx\b|\b(sin|cos|tan|cot|sec|csc)\b|\btheta\b|\bpi\b)", re.I)
 
 _HF_PIPE = None
 _HF_NAME = None
@@ -62,6 +64,98 @@ def _nfkc(s):
         return unicodedata.normalize("NFKC", s or "")
     except Exception:
         return s or ""
+
+def is_formula_query(q):
+    s = (q or "").lower()
+    return any(w in s for w in FORMULA_Q_WORDS)
+
+def _split_lines_blocks(t):
+    t = _nfkc(t)
+    t = t.replace("\u00a0", " ")
+    parts = []
+    for ln in t.splitlines():
+        x = ln.strip(" \t\r\n•-—–·")
+        if x:
+            parts.append(x)
+    return parts
+
+def _is_formula_line(s):
+    s = s.strip()
+    if not s:
+        return False
+    if FORMULA_HINT_RX.search(s):
+        return True
+    return False
+
+def _dedup_ordered(items):
+    out = []
+    seen = set()
+    for x in items:
+        k = re.sub(r"\s+", " ", x).strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            out.append(x)
+    return out
+
+def extract_formulas_from_chunks(chs, max_per_page=200, progress_cb=None):
+    rows = []
+    total = len(chs)
+    hit = 0
+    for i, c in enumerate(chs):
+        t = c.get("text","") or ""
+        if not t:
+            if progress_cb and (i % 50 == 0 or i == total - 1):
+                progress_cb(f"Scanning pages… {i+1}/{total} • formulas: {hit}")
+            continue
+        quick = FORMULA_HINT_RX.search(t)
+        if not quick:
+            if progress_cb and (i % 50 == 0 or i == total - 1):
+                progress_cb(f"Scanning pages… {i+1}/{total} • formulas: {hit}")
+            continue
+        lines = _split_lines_blocks(t)
+        got = []
+        for ln in lines:
+            if _is_formula_line(ln):
+                got.append(ln.strip())
+                if len(got) >= max_per_page:
+                    break
+        if got:
+            got = _dedup_ordered(got)
+            hit += len(got)
+            src = _fmt_source(c)
+            for g in got:
+                rows.append({"formula": g[:800], "source": src})
+        if progress_cb and (i % 20 == 0 or i == total - 1):
+            progress_cb(f"Scanning pages… {i+1}/{total} • formulas: {hit}")
+    return rows
+
+def summarize_all_formulas(question, chunks, progress_cb=None):
+    base = list(chunks)
+    if not base:
+        return {"answer": "Not found in sources.", "citations": [], "quotes": []}
+    mathy = []
+    for c in base:
+        t = c.get("text","")
+        if c.get("has_math") or FORMULA_HINT_RX.search(t or ""):
+            mathy.append(c)
+    used = mathy if mathy else base
+    if progress_cb:
+        progress_cb(f"Formula mode: scanning {len(used)} pages")
+    rows = extract_formulas_from_chunks(used, progress_cb=progress_cb)
+    if not rows:
+        return {"answer": "Not found in sources.", "citations": [], "quotes": []}
+    by_src = {}
+    for r in rows:
+        by_src.setdefault(r["source"], []).append(r["formula"])
+    md = []
+    md.append("**Formulas found**")
+    for src in sorted(by_src.keys()):
+        fs = _dedup_ordered(by_src[src])
+        md.append(f"\n- {src}")
+        for f in fs:
+            md.append(f"  - `{f}`")
+    cites = _dedup_ordered(list(by_src.keys()))
+    return {"answer": "\n".join(md), "citations": cites, "quotes": []}
 
 def _normalize_md(s):
     s = s.strip().replace("\u00a0", " ")
