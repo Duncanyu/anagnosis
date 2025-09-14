@@ -7,17 +7,17 @@
 
 ```mermaid
 graph LR
-    A[📄 Document Upload] --> B[🔍 AI Document Parser<br/>OCR + Multi-Strategy]
-    B --> C[🧠 Intelligent Chunking<br/>Structure + Content Detection]
-    C --> D[🔢 Vector Embeddings<br/>HuggingFace/OpenAI]
-    D --> E[📊 FAISS Vector Database<br/>Semantic Search]
+    A[Document Upload] --> B[AI Document Parser<br/>OCR + Multi-Strategy]
+    B --> C[Intelligent Chunking<br/>Structure + Content Detection]
+    C --> D[Vector Embeddings<br/>HuggingFace/OpenAI]
+    D --> E[FAISS Vector Database<br/>Semantic Search]
     
-    F[❓ User Query] --> G[🎯 Smart Retrieval<br/>MMR + Reranking]
+    F[User Query] --> G[Smart Retrieval<br/>MMR + Reranking]
     G --> E
-    E --> H[🤖 RAG Pipeline<br/>GPT-4 + Context Assembly]
-    H --> I[💬 AI Response<br/>Citations + Memory]
+    E --> H[RAG Pipeline<br/>GPT-4 + Context Assembly]
+    H --> I[AI Response<br/>Citations + Memory]
     
-    J[🧠 Conversation Memory] --> H
+    J[Conversation Memory] --> H
     I --> J
     
     classDef input fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
