@@ -6,63 +6,27 @@
 ## 1. Project Overview & AI Architecture Flow Chart
 
 ```mermaid
-graph TB
-    subgraph "Document Ingestion & AI Processing"
-        A[PDF/Image Upload] --> B[Multi-Strategy Parser]
-        B --> B1[PyMuPDF Primary]
-        B --> B2[PDFMiner Fallback]
-        B --> B3[Poppler Alternative]
-        B --> B4[OCR Recovery - Tesseract]
-        B --> B5[Custom Glyph Mapping]
-        B --> B6[Span Salvaging OCR]
-    end
+graph LR
+    A[📄 Document Upload] --> B[🔍 AI Document Parser<br/>OCR + Multi-Strategy]
+    B --> C[🧠 Intelligent Chunking<br/>Structure + Content Detection]
+    C --> D[🔢 Vector Embeddings<br/>HuggingFace/OpenAI]
+    D --> E[📊 FAISS Vector Database<br/>Semantic Search]
     
-    subgraph "AI-Powered Text Processing"
-        B --> C[Intelligent Chunker]
-        C --> C1[Structure Detection AI]
-        C --> C2[Content Classification]
-        C --> C3[Math/Formula Detection]
-        C --> C4[Token Management]
-    end
+    F[❓ User Query] --> G[🎯 Smart Retrieval<br/>MMR + Reranking]
+    G --> E
+    E --> H[🤖 RAG Pipeline<br/>GPT-4 + Context Assembly]
+    H --> I[💬 AI Response<br/>Citations + Memory]
     
-    subgraph "Machine Learning Pipeline"
-        C --> D[Vector Embedder]
-        D --> D1[HuggingFace Transformers<br/>intfloat/e5-small-v2]
-        D --> D2[OpenAI Embeddings<br/>text-embedding-3-small]
-        D --> E[FAISS Vector Index]
-        E --> E1[Semantic Search AI]
-    end
+    J[🧠 Conversation Memory] --> H
+    I --> J
     
-    subgraph "Advanced AI Query Processing"
-        F[User Query] --> G[Query Understanding]
-        G --> H[Semantic Retrieval]
-        H --> I[MMR Reranking Algorithm]
-        I --> J[Cross-Encoder Reranking]
-        J --> K[Context Assembly]
-    end
+    classDef input fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
+    classDef ai fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef output fill:#e8f5e8,stroke:#388e3c,stroke-width:2px
     
-    subgraph "LLM Response Generation"
-        K --> L[Memory Integration]
-        L --> M[RAG Pipeline]
-        M --> M1[GPT-4/GPT-4o-mini]
-        M --> M2[Local LLM Support]
-        M --> N[Citation Extraction AI]
-        N --> O[Response Synthesis]
-    end
-    
-    subgraph "Conversation AI Memory"
-        P[Conversation History] --> L
-        O --> Q[Memory Update]
-        Q --> P
-    end
-    
-    classDef ai fill:#e3f2fd,stroke:#1976d2,stroke-width:3px
-    classDef ml fill:#fff3e0,stroke:#f57c00,stroke-width:3px
-    classDef llm fill:#e8f5e8,stroke:#388e3c,stroke-width:3px
-    
-    class B4,C1,C2,C3,D1,D2,E1,G,I,J,M1,M2,N ai
-    class D,E,H,M ml
-    class L,O,Q llm
+    class A,F input
+    class B,C,D,E,G,H,J ai
+    class I output
 ```
 
 ### What Makes This an AI Project?
