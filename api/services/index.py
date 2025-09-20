@@ -3,6 +3,7 @@ import numpy as np
 import faiss
 from api.services.embed import embed_texts, embedding_info
 from api.core.config import load_config
+from api.services import formula_cls
 
 ART = pathlib.Path("artifacts"); ART.mkdir(parents=True, exist_ok=True)
 
@@ -113,6 +114,7 @@ def add_chunks(chunks, progress_cb=None):
     m = _meta()
     start = int(m.get("count", 0))
     ids = list(range(start, start + len(kept)))
+    kept = formula_cls.classify_chunks(kept, progress_cb=progress_cb)
     m["count"] = start + len(kept)
     _write_meta(m)
     with ch_path.open("a", encoding="utf-8") as f:
