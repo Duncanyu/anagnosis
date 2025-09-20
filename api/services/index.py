@@ -222,9 +222,7 @@ def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None):
     idx_path, _, _, _, _, _ = _active_paths()
     if not idx_path.exists():
         return []
-    t_end = None
-    if timeout_sec and timeout_sec > 0:
-        t_end = time.time() + float(timeout_sec)
+    t_end = time.time() + float(timeout_sec) if timeout_sec and timeout_sec > 0 else None
     if progress_cb:
         progress_cb("Search: encoding query")
     qv = embed_texts([text])
@@ -246,22 +244,24 @@ def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None):
         emb_scores.append(float(max(0.0, s)))
     if not cand_rows:
         return []
-    if progress_cb:
-        progress_cb(f"Search: candidates {len(cand_rows)}")
     emb_scores = np.array(emb_scores, dtype=float)
     if emb_scores.max() > 0:
         emb_scores = emb_scores / emb_scores.max()
     if progress_cb:
         progress_cb("Search: BM25 blending")
     bm25 = _bm25_scores(text, cand_rows)
-    hybrid = 0.7 * emb_scores + 0.3 * bm25
-    if t_end is not None and time.time() >= t_end:
+    eq_bonus = np.array([0.12 if r.get("is_equation") else 0.0 for r in cand_rows], dtype=float)
+    ex_pen = np.array([-0.10 if (r.get("section_tag") or "").lower() == "exercises" else 0.0 for r in cand_rows], dtype=float)
+    hybrid = 0.7 * emb_scores + 0.3 * bm25 + eq_bonus + ex_pen
+    if progress_cb:
+        progress_cb(f"Search: candidates {len(cand_rows)}")
+    if t_end and time.time() >= t_end:
         order = np.argsort(-hybrid)[:k]
         return [(float(hybrid[i]), cand_rows[i]) for i in order]
     if progress_cb:
         progress_cb("Search: reconstructing candidate vectors")
     dvs = _reconstruct_batch(idx, cand_ids, progress_cb=progress_cb, t_end=t_end)
-    if dvs is None or (t_end is not None and time.time() >= t_end):
+    if dvs is None or (t_end and time.time() >= t_end):
         order = np.argsort(-hybrid)[:k]
         return [(float(hybrid[i]), cand_rows[i]) for i in order]
     if progress_cb:
@@ -271,3 +271,6 @@ def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None):
     for i in order_local:
         out.append((float(hybrid[i]), cand_rows[i]))
     return out
+
+def list_chunks():
+    return _all_chunks()
