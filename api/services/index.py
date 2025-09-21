@@ -144,6 +144,22 @@ def _tok(text):
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return [w for w in text.split() if w]
 
+def _is_formula_query(q):
+    s = (q or "").lower()
+    keys = ("formula","equation","equations","law","laws","rule","rules","identity","identities","theorem","theorems","lemma","lemmas","corollary","corollaries")
+    for k in keys:
+        if k in s:
+            return True
+    return False
+
+def _wants_explanation(q):
+    s = (q or "").lower()
+    keys = ("explain","why","proof","prove","derivation","derive","intuition")
+    for k in keys:
+        if k in s:
+            return True
+    return False
+
 def _bm25_scores(query, docs, k1=1.5, b=0.75):
     q = _tok(query)
     if not q:
@@ -252,9 +268,65 @@ def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None):
     if progress_cb:
         progress_cb("Search: BM25 blending")
     bm25 = _bm25_scores(text, cand_rows)
+    fflag = _is_formula_query(text)
+
+    def _has_math_surface(t):
+        if not t: return False
+        syms = ("=", "+", "-", "*", "/", "×", "÷", "≤", "≥", "√", "∑", "∫", "f(", "g(", "h(")
+        return any(s in t for s in syms)
+
+    def _bad_section(r):
+        sec = (r.get("section_tag") or "").lower()
+        bad_sections = ("answers", "supplementary exercises", "references", "bibliography")
+        return any(bs in sec for bs in bad_sections)
+
+    if fflag and not _wants_explanation(text):
+        filtered_rows, filtered_ids, filtered_emb_scores, filtered_bm25 = [], [], [], []
+        for r, i, es, bs in zip(cand_rows, cand_ids, emb_scores, bm25):
+            if _bad_section(r):
+                continue
+            filtered_rows.append(r)
+            filtered_ids.append(i)
+            filtered_emb_scores.append(es)
+            filtered_bm25.append(bs)
+        cand_rows, cand_ids = filtered_rows, filtered_ids
+        emb_scores = np.array(filtered_emb_scores, dtype=float)
+        bm25 = np.array(filtered_bm25, dtype=float)
+        prompt = (text or "").lower().strip()
+        penalize_starts = ("determine", "how many", "prove that")
+        if any(prompt.startswith(p) for p in penalize_starts):
+            emb_scores *= 0.85
+            bm25 *= 0.85
+
+    conf_cut = 0.75
+    strict_rows, strict_ids, strict_emb, strict_bm25 = [], [], [], []
+    if fflag and not _wants_explanation(text):
+        for r,i,es,bs in zip(cand_rows,cand_ids,emb_scores,bm25):
+            if r.get("is_formula"):
+                p = float(r.get("formula_confidence") or 0.0)
+                if p >= conf_cut or _has_math_surface(r.get("text","")):
+                    strict_rows.append(r); strict_ids.append(i); strict_emb.append(es); strict_bm25.append(bs)
+        if strict_rows:
+            cand_rows, cand_ids = strict_rows, strict_ids
+            emb_scores = np.array(strict_emb, dtype=float)
+            bm25 = np.array(strict_bm25, dtype=float)
+
     eq_bonus = np.array([0.12 if r.get("is_equation") else 0.0 for r in cand_rows], dtype=float)
     ex_pen = np.array([-0.10 if (r.get("section_tag") or "").lower() == "exercises" else 0.0 for r in cand_rows], dtype=float)
-    hybrid = 0.7 * emb_scores + 0.3 * bm25 + eq_bonus + ex_pen
+    kw_terms = ("theorem","lemma","corollary","axiom","law","rule","identity","property","postulate","proposition")
+    kw_bonus = np.array([0.08 if any(k in (r.get("text","" ).lower()) for k in kw_terms) else 0.0 for r in cand_rows], dtype=float)
+    if fflag:
+        fb = []
+        for r in cand_rows:
+            if r.get("is_formula"):
+                p = float(r.get("formula_confidence") or 0.0)
+                fb.append(0.35 * max(0.0, min(1.0, p)))
+            else:
+                fb.append(-0.5)
+        form_bonus = np.array(fb, dtype=float)
+    else:
+        form_bonus = np.zeros(len(cand_rows), dtype=float)
+    hybrid = 0.7 * emb_scores + 0.3 * bm25 + eq_bonus + ex_pen + kw_bonus + form_bonus
     if progress_cb:
         progress_cb(f"Search: candidates {len(cand_rows)}")
     if t_end and time.time() >= t_end:

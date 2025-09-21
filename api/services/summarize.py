@@ -51,6 +51,12 @@ FORMULA_Q_WORDS = {"formula","formulas","identity","identities","equation","equa
 FORMULA_POS_TERMS = {"formula","formulas","identity","identities","rule","rules","law","laws","property","properties","theorem","theorems","definition","definitions","summary","key formulas","double-angle","half-angle","sum","difference"}
 FORMULA_NEG_TERMS = {"exercise","exercises","problem","problems","example","examples","solution","solutions","answer","answers","practice","review"}
 FORMULA_HINT_RX = re.compile(r"(=|≈|≅|≤|≥|≠|±|∝|∑|∏|∫|√|∞|∇|∂|d/dx|\bdy/dx\b|\be\^|\^\s*\w|\|.+\||\b(sin|cos|tan|cot|sec|csc|log|ln|exp)\s*\()", re.I)
+PROMPT_PREFIX_RX = re.compile(r"^\s*(determine|how many|prove|show|find|compute|evaluate|solve)\b", re.I)
+HEAD_VETO_RX = re.compile(r"(answers to odd|supplementary exercises|references|bibliography)", re.I)
+BIB_HINT_RX = re.compile(r"(ISBN|Prentice|Wiley|Springer|Addison|Pearson|McGraw|Elsevier|Englewood|Cliffs|NJ|NY:)", re.I)
+YEAR_RX = re.compile(r"\b(19|20)\d{2}\b")
+LINE_VETO_RX = re.compile(r"^(we write|often we give|this function is defined|if f\(a\) = b|answers to odd|supplementary exercises)\b", re.I)
+EXERCISE_ANY_RX = re.compile(r"\b(determine|how many|prove|show|find|compute|evaluate|solve)\b", re.I)
 EQ_SPAN_RX = re.compile(r"[^.;:\n]{1,120}(?:=|≈|≅|≤|≥|≠|∝)[^.;:\n]{1,120}")
 FUNC_SPAN_RX = re.compile(r"\b(?:sin|cos|tan|cot|sec|csc|log|ln|exp)\s*\([^)(\n]{1,80}\)", re.I)
 DERIV_SPAN_RX = re.compile(r"(?:d\s*[a-zA-Z]\s*/\s*d\s*[a-zA-Z]|∂\s*[a-zA-Z]\s*/\s*∂\s*[a-zA-Z]|dy/dx)", re.I)
@@ -165,7 +171,7 @@ def _is_good_span(span, ctx_score):
         return False
     if len(span) > 160 and dens < 0.30:
         return False
-    has_sym = bool(re.search(r"[=±∑∏∫√∞∇∂^]", span))
+    has_sym = bool(re.search(r"[=≤≥≠∑∏∫√∞∇∂^]|[∀∃¬∧∨→⇒⇔↔]", span))
     has_var = bool(re.search(r"[A-Za-zα-ωΑ-Ω]", span))
     if not (has_sym and has_var):
         return False
@@ -188,7 +194,7 @@ def _dedup_ordered(items):
             out.append(x)
     return out
 
-def extract_formulas_from_chunks(chs, max_per_page=200, progress_cb=None, time_budget_sec=None):
+def extract_formulas_from_chunks(chs, max_per_page=200, progress_cb=None, time_budget_sec=None, wants_explain=False):
     rows = []
     total = len(chs)
     found = 0
@@ -202,9 +208,23 @@ def extract_formulas_from_chunks(chs, max_per_page=200, progress_cb=None, time_b
                 progress_cb(f"Scanning pages… {i+1}/{total} • formulas: {found}")
             continue
         ctxs = _context_score(c)
+        hp = (c.get("heading_path") or "")
+        st = (c.get("section_tag") or "")
+        if not wants_explain and (HEAD_VETO_RX.search(hp) or HEAD_VETO_RX.search(st)):
+            if progress_cb and (i % 20 == 0 or i == total - 1):
+                progress_cb(f"Scanning pages… {i+1}/{total} • formulas: {found}")
+            continue
         lines = _split_lines_blocks(t)
         kept = []
         for ln in lines:
+            if not wants_explain and (BIB_HINT_RX.search(ln) or YEAR_RX.search(ln)):
+                continue
+            if PROMPT_PREFIX_RX.search(ln) and not wants_explain and not FORMULA_HINT_RX.search(ln):
+                continue
+            if LINE_VETO_RX.search(ln):
+                continue
+            if EXERCISE_ANY_RX.search(ln) and not wants_explain and not FORMULA_HINT_RX.search(ln):
+                continue
             spans = _extract_formula_spans(ln)
             if not spans:
                 continue
@@ -253,7 +273,9 @@ def summarize_all_formulas(question, chunks, progress_cb=None, exhaustive=None, 
     ma_non = [c for c in base if not c.get("is_equation") and c.get("has_math") and (c.get("section_tag") or "") != "exercises"]
     ma_ex  = [c for c in base if not c.get("is_equation") and c.get("has_math") and (c.get("section_tag") or "") == "exercises"]
     ordered = eq_non + ma_non + eq_ex + ma_ex
-    rows = extract_formulas_from_chunks(ordered, progress_cb=progress_cb, time_budget_sec=tb)
+    ask = (question or "").lower()
+    wants_explain = any(k in ask for k in ("explain","why","derive","derivation","proof","prove","show"))
+    rows = extract_formulas_from_chunks(ordered, progress_cb=progress_cb, time_budget_sec=tb, wants_explain=wants_explain)
     if not rows:
         return {"answer":"Not found in sources.", "citations":[], "quotes":[]}
     rows.sort(key=lambda r: r.get("page", 0))
