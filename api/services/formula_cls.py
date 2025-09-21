@@ -1,5 +1,3 @@
-
-
 import os, pathlib, datetime, re
 from typing import List, Dict
 import numpy as np
@@ -11,9 +9,20 @@ _SESS = None
 _TOK = None
 _INFO = {"loaded": False, "path": "", "max_len": 512, "backend": "onnxruntime"}
 
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, str(default)))
+    except Exception:
+        return default
+
+def _has_math_surface(t: str) -> bool:
+    if not t:
+        return False
+    return bool(_MATH_TOKENS.search(t))
+
 _ISBN13 = re.compile(r"\b97[89][\-\s]?\d{1,5}[\-\s]?\d+[\-\s]?\d+[\-\s]?\d\b")
 _ISBN10 = re.compile(r"\b(?:\d[\-\s]?){9}[\dX]\b")
-_MATH_TOKENS = re.compile(r"(=|\+|−|\-|×|÷|/|\^|\\|∑|∫|√|≤|≥|<|>|≈|≠|→|∈|∉|∩|∪|∂|Δ|∇|\b(sin|cos|tan|log|ln|exp|lim)\b|d/dx|dy/dx|dx|dt)", re.IGNORECASE)
+_MATH_TOKENS = re.compile(r"(=|\+|−|\-|×|÷|/|\^|\\|∑|∫|√|≤|≥|<|>|≈|≠|→|⇒|⇔|∧|∨|¬|⊕|⊢|⊨|⊥|⊤|∀|∃|∴|∵|∈|∉|∩|∪|∂|Δ|∇|\b(sin|cos|tan|log|ln|exp|lim)\b|d/dx|dy/dx|dx|dt|\bfor all\b|\bthere exists\b)", re.IGNORECASE)
 
 def _veto_not_formula(t: str) -> bool:
     s = t.strip()
@@ -38,9 +47,19 @@ def _load():
     d = _model_dir()
     onnx_path = d / "model.onnx"
     tok = AutoTokenizer.from_pretrained(str(d))
-    sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"]) 
+    so = ort.SessionOptions()
+    thr = _env_int("FORMULA_CLS_THREADS", 0)
+    if thr > 0:
+        so.intra_op_num_threads = thr
+        so.inter_op_num_threads = thr
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    try:
+        so.execution_mode = ort.ExecutionMode.ORT_PARALLEL
+    except Exception:
+        pass
+    sess = ort.InferenceSession(str(onnx_path), sess_options=so, providers=["CPUExecutionProvider"])
     _SESS, _TOK = sess, tok
-    _INFO = {"loaded": True, "path": str(d), "max_len": 512, "backend": "onnxruntime"}
+    _INFO = {"loaded": True, "path": str(d), "max_len": 512, "backend": "onnxruntime", "threads": thr}
     _LOADED = True
     return _SESS, _TOK
 
@@ -73,7 +92,7 @@ def _softmax(x):
     s = e / np.sum(e, axis=-1, keepdims=True)
     return s
 
-def classify_chunks(chunks: List[Dict], progress_cb=None, batch_size: int = 32, max_len: int = 512):
+def classify_chunks(chunks: List[Dict], progress_cb=None, batch_size: int = 64, max_len: int = 512):
     if not chunks:
         return
     texts = []
@@ -81,22 +100,38 @@ def classify_chunks(chunks: List[Dict], progress_cb=None, batch_size: int = 32, 
         t = c.get("text") or ""
         t = re.sub(r"\s+", " ", t).strip()[:4000]
         texts.append(t)
-    preds = []
-    confs = []
+    n = len(texts)
+    preds = ["NOT_FORMULA"] * n
+    confs = [0.5] * n
     sess, tok = _load()
     if sess is None or tok is None:
-        preds = ["NOT_FORMULA" for _ in texts]
-        confs = [0.5 for _ in texts]
+        pass
     else:
-        for i in range(0, len(texts), batch_size):
-            if progress_cb:
-                progress_cb(min(len(texts), i+batch_size), len(texts))
-            feeds = _prep(texts[i:i+batch_size], tok, max_len)
-            logits = sess.run(["logits"], feeds)[0]
-            probs = _softmax(logits)
-            labs = np.argmax(probs, axis=-1)
-            preds.extend(["FORMULA" if int(x)==1 else "NOT_FORMULA" for x in labs])
-            confs.extend([float(p[1]) for p in probs])
+        bs_env = _env_int("FORMULA_CLS_BATCH_SIZE", batch_size)
+        ml_math = _env_int("FORMULA_CLS_MAX_TOKENS_MATH", 384)
+        ml_text = _env_int("FORMULA_CLS_MAX_TOKENS_TEXT", 256)
+        idx_math = [i for i,t in enumerate(texts) if _has_math_surface(t)]
+        idx_text = [i for i,t in enumerate(texts) if not _has_math_surface(t)]
+        done = 0
+        for group, max_len in ((idx_math, ml_math), (idx_text, ml_text)):
+            group_sorted = sorted(group, key=lambda j: len(texts[j]))
+            for k in range(0, len(group_sorted), bs_env):
+                ids = group_sorted[k:k+bs_env]
+                if progress_cb:
+                    progress_cb(min(n, done + len(ids)), n)
+                batch_txt = [texts[j] for j in ids]
+                feeds = _prep(batch_txt, tok, max_len)
+                logits = sess.run(["logits"], feeds)[0]
+                probs = _softmax(logits)
+                labs = np.argmax(probs, axis=-1)
+                for j, lab, p in zip(ids, labs, probs):
+                    if int(lab) == 1:
+                        preds[j] = "FORMULA"
+                        confs[j] = float(p[1])
+                    else:
+                        preds[j] = "NOT_FORMULA"
+                        confs[j] = float(1.0 - p[1])
+                done += len(ids)
     ts = datetime.datetime.utcnow().isoformat() + "Z"
     tag = _INFO["backend"] + ":" + _INFO.get("path", "") if _INFO.get("loaded") else "disabled"
     for c, txt, lab, p in zip(chunks, texts, preds, confs):
@@ -106,5 +141,5 @@ def classify_chunks(chunks: List[Dict], progress_cb=None, batch_size: int = 32, 
         c["formula_label"] = "FORMULA" if is_form else "NOT_FORMULA"
         c["formula_model"] = tag
         c["formula_timestamp"] = ts
-        c["formula_confidence"] = float(p if is_form else 1.0 - p)
+        c["formula_confidence"] = float(p)
     return chunks
