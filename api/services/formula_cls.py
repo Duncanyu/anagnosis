@@ -3,6 +3,7 @@ from typing import List, Dict
 import numpy as np
 import onnxruntime as ort
 from transformers import AutoTokenizer
+from api.services import formula_cls
 
 _LOADED = False
 _SESS = None
@@ -142,4 +143,12 @@ def classify_chunks(chunks: List[Dict], progress_cb=None, batch_size: int = 64, 
         c["formula_model"] = tag
         c["formula_timestamp"] = ts
         c["formula_confidence"] = float(p)
+    return chunks
+
+def _ensure_formula_labels(chunks, progress_cb=None):
+    if not chunks:
+        return chunks
+    need = [c for c in chunks if "is_formula" not in c]
+    if need:
+        formula_cls.classify_chunks(need, progress_cb=progress_cb)
     return chunks

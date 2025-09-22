@@ -154,26 +154,32 @@ class AskWorker(QtCore.QThread):
     finished = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
 
-    def __init__(self, question, k, history):
+    def __init__(self, question, k, history, formula_mode=False):
         super().__init__()
         self.question = question
         self.k = k
         self.history = history
+        self.formula_mode = formula_mode
         
     def run(self):
         try:
             self.progress.emit("Searching index…")
             self.progress_pct.emit(10)
 
-            pool = int(os.environ.get("ASK_CANDIDATES","300"))
+            base_pool = int(os.environ.get("ASK_CANDIDATES","300"))
+            pool = int(os.environ.get("ASK_CANDIDATES_FORMULA","3000")) if self.formula_mode else base_pool
             self._pc = 12
             def s_cb(msg):
                 self.progress.emit(msg)
                 self._pc = min(55, self._pc + 3)
                 self.progress_pct.emit(self._pc)
 
-            tb = int(os.environ.get("ASK_TIME_BUDGET_SEC","120"))
-            st = int(os.environ.get("SEARCH_TIMEOUT_SEC", str(max(10, min(tb//2, 30)))))
+            tb_base = int(os.environ.get("ASK_TIME_BUDGET_SEC","120"))
+            tb = int(os.environ.get("ASK_TIME_BUDGET_SEC_FORMULA","240")) if self.formula_mode else tb_base
+            st_base = max(10, min(tb_base//2, 30))
+            st = int(os.environ.get("SEARCH_TIMEOUT_SEC", str(st_base)))
+            if self.formula_mode:
+                st = int(os.environ.get("SEARCH_TIMEOUT_SEC_FORMULA", str(max(20, min(tb//2, 60)))))
 
             hits = search(self.question, k=pool, progress_cb=s_cb, timeout_sec=st, pool=pool)
             self.progress.emit(f"Hits: {len(hits)}")
@@ -184,9 +190,11 @@ class AskWorker(QtCore.QThread):
 
             top_chunks = [h[1] for h in hits]
 
-            if is_formula_query(self.question):
+            if self.formula_mode:
                 self.progress.emit("Formula mode: extracting all formulas in scope…")
                 total = len(top_chunks)
+                if total < pool:
+                    self.progress.emit(f"Warning: only {total} / {pool} chunks returned; consider increasing index size or candidate pool.")
                 def p_cb(msg):
                     self.progress.emit(msg)
                     m = re.search(r"(\d+)\s*/\s*(\d+)", msg)
@@ -477,9 +485,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.k_spin = QtWidgets.QSpinBox()
         self.k_spin.setRange(1, 500)
         self.k_spin.setValue(10)
+        self.formula_cb = QtWidgets.QCheckBox("Formula mode")
+        prefs = read_prefs()
+        self.formula_cb.setChecked(as_bool(prefs.get("ASK_FORMULA_FORCE", os.environ.get("ASK_FORMULA_FORCE", "0"))))
+        self.strict_cb = QtWidgets.QCheckBox("Only this document")
+        self.strict_cb.setChecked(as_bool(prefs.get("ASK_STRICT_DOC", os.environ.get("ASK_STRICT_DOC", "0"))))
         controls = QtWidgets.QHBoxLayout()
         controls.addWidget(QtWidgets.QLabel("Top-k:"))
         controls.addWidget(self.k_spin)
+        controls.addWidget(self.formula_cb)
+        controls.addWidget(self.strict_cb)
         controls.addStretch(1)
 
         self.answer = QtWidgets.QTextEdit()
@@ -672,7 +687,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ask_btn_inbar.setEnabled(False)
         self.status_prog.show()
         self.status_prog.setValue(0)
-        self.ask_worker = AskWorker(q, self.k_spin.value(), history=self.history)
+        prefs = read_prefs()
+        prefs["ASK_STRICT_DOC"] = "true" if self.strict_cb.isChecked() else "false"
+        prefs["ASK_FORMULA_FORCE"] = "true" if self.formula_cb.isChecked() else "false"
+        write_prefs(prefs)
+        os.environ["ASK_STRICT_DOC"] = "1" if self.strict_cb.isChecked() else "0"
+        os.environ["ASK_FORMULA_FORCE"] = "1" if self.formula_cb.isChecked() else "0"
+        self.ask_worker = AskWorker(q, self.k_spin.value(), history=self.history, formula_mode=self.formula_cb.isChecked())
         self.ask_worker.progress.connect(lambda s: self.status.showMessage(s))
         self.ask_worker.progress_pct.connect(self.status_prog.setValue)
         self.ask_worker.finished.connect(self.ask_done)
