@@ -51,7 +51,10 @@ FORMULA_P_MIN = float(os.getenv("FORMULA_P_MIN", "0.80"))
 FORMULA_MIN_PROB = float(os.getenv("FORMULA_MIN_PROB", "0.45"))
 FORMULA_KEEP_FRAC = float(os.getenv("FORMULA_KEEP_FRAC", "0.50"))
 FORMULA_MIN_FORMULA_RATIO = float(os.getenv("FORMULA_MIN_FORMULA_RATIO", "0.25"))
+FORMULA_MIN_KEEP_PER_PAGE = int(os.getenv("FORMULA_MIN_KEEP_PER_PAGE","3"))
+FORMULA_STRONG_DENS = float(os.getenv("FORMULA_STRONG_DENS","0.55"))
 ASK_FORMULA_DEBUG = (os.getenv("ASK_FORMULA_DEBUG", "1").lower() in {"1","true","yes","on"})
+ASK_CITATION_NOTE = (os.getenv("ASK_CITATION_NOTE", "1").lower() in {"1","true","yes","on"})
 
 TEMPLATE = """You are a study assistant. Answer the question using ONLY the provided context.
 Start with a single bold sentence that directly answers the question. Then, if helpful, add short bullet points. Do not start the response with a bullet. Cite sources like [FileName.pdf p.3] or [FileName.pdf p.3–4].
@@ -200,6 +203,91 @@ def _scope_chunks(question, chs):
     for c in chs:
         (pri if _doc_name(c) == tgt else sec).append(c)
     return pri + sec
+
+CHAPTER_RX = re.compile(r"\b(?:chapter|chap|ch)\s*([0-9]{1,3})\b", re.I)
+SECTION_RX = re.compile(r"\b(?:section|sec|§)\s*([0-9]+(?:\.[0-9]+)*)\b", re.I)
+HEADING_CH_RX = re.compile(r"\bchapter\s*([0-9]{1,3})\b", re.I)
+HEADING_SEC_RX = re.compile(r"\bsection\s*([0-9]+(?:\.[0-9]+)*)\b", re.I)
+LEAD_NUM_RX = re.compile(r"^\s*([0-9]{1,3})(?:\.[0-9]+)*\b")
+CHAPTER_PAGE_WINDOW = int(os.getenv("ASK_CHAPTER_PAGE_WINDOW", "40"))
+
+def _parse_chapter_query(q):
+    q = (q or "").strip()
+    ch = None
+    sec = None
+    m = CHAPTER_RX.search(q)
+    if m:
+        try:
+            ch = int(m.group(1))
+        except Exception:
+            ch = None
+    m2 = SECTION_RX.search(q)
+    if m2:
+        sec = m2.group(1)
+    return ch, sec
+
+def _chapter_from_heading(hp):
+    if not hp:
+        return None, None
+    m = HEADING_CH_RX.search(hp)
+    ch = None
+    if m:
+        try:
+            ch = int(m.group(1))
+        except Exception:
+            ch = None
+    m2 = HEADING_SEC_RX.search(hp)
+    sec = m2.group(1) if m2 else None
+    if ch is None:
+        m3 = LEAD_NUM_RX.search(hp)
+        if m3:
+            try:
+                ch = int(m3.group(1))
+            except Exception:
+                ch = None
+    return ch, sec
+
+def _filter_by_chapter(question, chs, soft=True):
+    ch_req, sec_req = _parse_chapter_query(question)
+    if not ch_req and not sec_req:
+        return chs
+    prim, soft_pool = [], []
+    pages = []
+    for c in chs:
+        hp = (c.get("heading_path") or c.get("section_tag") or "").lower()
+        ch, sec = _chapter_from_heading(hp)
+        if ch_req and ch == ch_req:
+            prim.append(c)
+            p = _page_num(c)
+            if p:
+                pages.append(p)
+        elif (not ch_req) and sec_req and sec and sec.startswith(sec_req):
+            prim.append(c)
+            p = _page_num(c)
+            if p:
+                pages.append(p)
+        else:
+            soft_pool.append(c)
+    if prim:
+        if pages:
+            import numpy as _np
+            mid = int(_np.median(pages))
+            lo = max(1, mid - CHAPTER_PAGE_WINDOW)
+            hi = mid + CHAPTER_PAGE_WINDOW
+            near = [c for c in soft_pool if lo <= _page_num(c) <= hi]
+            prim.extend(near)
+        return prim
+    if soft:
+        toks = re.findall(r"[a-z0-9\\.]+", f"chapter {ch_req or ''} {sec_req or ''}")
+        def _score(c):
+            hp = (c.get("heading_path") or "").lower()
+            s = 0
+            for t in toks:
+                if t and t in hp:
+                    s += 1
+            return -s
+        return sorted(chs, key=_score)
+    return chs
 
 def _page_num(c):
     for k in ("page","page_num","page_index","page_start"):
@@ -406,11 +494,9 @@ def extract_formulas_from_chunks(chs, max_per_page=FORMULA_MAX_PER_PAGE, progres
                 progress_cb(f"Scanning pages… {i+1}/{total} • formulas: {found}")
             continue
         hint_ok = bool(FORMULA_HINT_RX.search(t))
+        soft_page = False
         if not hint_ok and not exhaustive_scan:
-            diag["skipped_no_hint"] += 1
-            if progress_cb and (i % 50 == 0 or i == total - 1):
-                progress_cb(f"Scanning pages… {i+1}/{total} • formulas: {found}")
-            continue
+            soft_page = True
         ctxs = _context_score(c)
         hp = (c.get("heading_path") or "")
         st = (c.get("section_tag") or "")
@@ -443,26 +529,33 @@ def extract_formulas_from_chunks(chs, max_per_page=FORMULA_MAX_PER_PAGE, progres
             if not spans:
                 continue
             for s in spans:
-                if _is_good_span(s, ctxs):
-                    p = None
-                    if HAS_FCLS and _FORMULA_SCORE_FN is not None:
-                        try:
-                            if s in p_cache:
-                                p = p_cache[s]
-                            else:
-                                res = _FORMULA_SCORE_FN([s])
-                                p = float(res[0]) if isinstance(res, (list, tuple)) else float(res)
-                                p_cache[s] = p
-                            diag["scored"] += 1
-                            diag["p_sum"] += float(p)
-                        except Exception:
-                            p = None
+                base_ok = _is_good_span(s, ctxs)
+                words = len(re.findall(r"[A-Za-z]{3,}", s))
+                ops = len(re.findall(r"[=<>±∑∏∫√∞∇∂\^*/+\-|]", s))
+                dens = ops / max(1, ops + words)
+                keep_by_density = dens >= FORMULA_STRONG_DENS
+                p = None
+                if HAS_FCLS and _FORMULA_SCORE_FN is not None:
+                    try:
+                        if s in p_cache:
+                            p = p_cache[s]
+                        else:
+                            res = _FORMULA_SCORE_FN([s])
+                            p = float(res[0]) if isinstance(res, (list, tuple)) else float(res)
+                            p_cache[s] = p
+                        diag["scored"] += 1
+                        diag["p_sum"] += float(p)
+                    except Exception:
+                        p = None
+                page_prob = FORMULA_MIN_PROB + (0.08 if soft_page else 0.0)
+                keep_by_prob = (p is not None and p >= page_prob)
+                if base_ok or keep_by_prob or keep_by_density:
                     sym = s.count("=")*0.35 + s.count("∑")*0.45 + s.count("∫")*0.45 + s.count("→")*0.25 + s.count("↔")*0.25
                     sym = min(1.4, sym)
                     lp = -0.15 if len(s) > 140 else 0.0
                     base_ctx = 0.8 * ctxs
                     if p is None:
-                        sc = 1.5 + base_ctx + sym + lp
+                        sc = 1.5 + base_ctx + sym + lp + (0.2 if keep_by_density else 0.0)
                     else:
                         sc = 3.0 * p + base_ctx + sym + lp
                     kept.append((sc, s))
@@ -474,8 +567,9 @@ def extract_formulas_from_chunks(chs, max_per_page=FORMULA_MAX_PER_PAGE, progres
         if kept:
             kept.sort(key=lambda z: -z[0])
             scored = kept
-            min_keep = max(1, int(len(scored) * FORMULA_KEEP_FRAC))
+            min_keep = max(FORMULA_MIN_KEEP_PER_PAGE, int(len(scored) * FORMULA_KEEP_FRAC))
             filter_by_prob = []
+            page_prob = FORMULA_MIN_PROB + (0.08 if 'soft_page' in locals() and soft_page else 0.0)
             for sc, s in scored:
                 p = None
                 if HAS_FCLS and _FORMULA_SCORE_FN is not None:
@@ -489,7 +583,7 @@ def extract_formulas_from_chunks(chs, max_per_page=FORMULA_MAX_PER_PAGE, progres
                     except Exception:
                         p = None
                 if p is not None:
-                    if p >= FORMULA_MIN_PROB:
+                    if p >= page_prob:
                         filter_by_prob.append((sc, s, p))
                 else:
                     filter_by_prob.append((sc, s, None))
@@ -553,6 +647,7 @@ def summarize_all_formulas(question, chunks, progress_cb=None, exhaustive=None, 
             pass
 
     base = _scope_chunks(question, base)
+    base = _filter_by_chapter(question, base)
     base = _ensure_formula_labels(base, progress_cb)
     total_scoped = len(base)
     labeled = [c for c in base if c.get("is_formula")]
@@ -599,10 +694,14 @@ def summarize_all_formulas(question, chunks, progress_cb=None, exhaustive=None, 
         return {"answer":"Not found in sources.", "citations":[], "quotes":[]}
     rows.sort(key=lambda r: (r.get("source",""), r.get("page",0)))
     answer = _canonicalize_formulas(question, rows)
-    cites = _dedup_ordered([r.get("source","") for r in rows])[:15]
+    raw_cites = _dedup_ordered([r.get("source","") for r in rows])
+    cites = _compress_citations(raw_cites)[:10]
     if ASK_FORMULA_DEBUG:
         cov = f"Coverage {diag.get('scanned',0)}/{len(ordered)} pages; skipped_no_hint {diag.get('skipped_no_hint',0)}"
         answer += "\n\n_Diagnostics: SFT filtering active; {}. Min prob = {:.2f}_".format(cov, FORMULA_P_MIN)
+    if ASK_CITATION_NOTE:
+        answer += "\n\n*Grounded in the cited pages below.*"
+    return {"answer": answer, "citations": cites, "quotes": []}
     return {"answer": answer, "citations": cites, "quotes": []}
 
 def _normalize_md(s):
@@ -727,6 +826,40 @@ def _fmt_source(c):
     if ps:
         return f"[{doc} p.{ps}]"
     return f"[{doc} p.?]"
+
+def _compress_citations(cites):
+    by_doc = {}
+    rx = re.compile(r"^\[([^]]+?)\s+p\.(\d+)(?:-(\d+))?\]$")
+    for tag in cites:
+        m = rx.match(tag or "")
+        if not m:
+            by_doc.setdefault(tag or "", set())
+            continue
+        doc = m.group(1)
+        a = int(m.group(2))
+        b = int(m.group(3) or m.group(2))
+        pages = by_doc.setdefault(doc, set())
+        for p in range(min(a, b), max(a, b) + 1):
+            pages.add(p)
+    out = []
+    for doc, pages in by_doc.items():
+        if not pages:
+            out.append(f"[{doc}]")
+            continue
+        ps = sorted(pages)
+        ranges = []
+        s = e = ps[0]
+        for p in ps[1:]:
+            if p == e + 1:
+                e = p
+            else:
+                ranges.append((s, e))
+                s = e = p
+        ranges.append((s, e))
+        parts = [(str(s) if s == e else f"{s}–{e}") for s, e in ranges]
+        out.append(f"[{doc} p.{', '.join(parts)}]")
+    out.sort()
+    return out
 
 def _format_ctx(chs):
     parts = []
@@ -978,6 +1111,7 @@ def _batch_chunks(chs, budget_chars):
 def summarize(question, top_chunks, history=None):
     cfg = load_config()
     scoped = _scope_chunks(question, top_chunks)
+    scoped = _filter_by_chapter(question, scoped)
     filtered = _filter_chunks(scoped)
     used = filtered if filtered else list(scoped)
     if not used:
@@ -1015,12 +1149,16 @@ def summarize(question, top_chunks, history=None):
     for s in cites:
         if s not in seen:
             dedup.append(s); seen.add(s)
+    cites = _compress_citations(dedup)[:15]
+    if ASK_CITATION_NOTE:
+        text += "\n\n*Grounded in the cited pages below.*"
     quotes = _extract_quotes(question, used, max_quotes=5, window=1)
-    return {"answer": text, "citations": dedup, "quotes": quotes}
+    return {"answer": text, "citations": cites, "quotes": quotes}
 
 def summarize_batched(question, chunks, history=None, progress_cb=None, max_batches=None, time_budget_sec=None, exhaustive=None):
     cfg = load_config()
     scoped = _scope_chunks(question, chunks)
+    scoped = _filter_by_chapter(question, scoped)
     filtered = _filter_chunks(scoped)
     base = filtered if filtered else list(scoped)
     if not base:
@@ -1138,6 +1276,10 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
             cites.append(s); seen.add(s)
         if len(cites) >= 15:
             break
+    quotes = _extract_quotes(question, ordered[:min(len(ordered), 200)], max_quotes=5, window=1)
+    cites = _compress_citations(cites)[:15]
+    if ASK_CITATION_NOTE:
+        final += "\n\n*Grounded in the cited pages below.*"
     quotes = _extract_quotes(question, ordered[:min(len(ordered), 200)], max_quotes=5, window=1)
     return {"answer": final, "citations": cites, "quotes": quotes}
 
