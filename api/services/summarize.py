@@ -5,12 +5,53 @@ import os, re, json, time, pathlib, math
 import numpy as np
 import unicodedata
 
-try:
-    from api.services.formula_cls import score as formula_score
-    HAS_FCLS = True
-except Exception:
-    HAS_FCLS = False
-FORMULA_CLS_ENABLE = os.getenv("FORMULA_CLS_ENABLE", "1").lower() in {"1","true","yes","on"}
+from api.services import formula_cls
+
+HAS_FCLS = True
+
+def _formula_score_fn():
+    try:
+        for name in ("score", "score_texts", "score_spans", "predict", "predict_proba"):
+            fn = getattr(formula_cls, name, None)
+            if callable(fn):
+                return fn
+    except Exception:
+        pass
+    return None
+
+_FORMULA_SCORE_FN = _formula_score_fn()
+
+def _maybe_init_sft(progress_cb=None):
+    global _FORMULA_SCORE_FN
+    if _FORMULA_SCORE_FN is not None:
+        return
+    try:
+        ensure = getattr(formula_cls, "ensure_span_scorer", None) or getattr(formula_cls, "ensure_scorer", None)
+        name = os.getenv("FORMULA_SFT_NAME", "")
+        path = os.getenv("FORMULA_SFT_PATH", "")
+        if ensure:
+            try:
+                ensure(name=name, path=path)
+            except TypeError:
+                try:
+                    ensure(name or path or "tinybert")
+                except Exception:
+                    pass
+        _FORMULA_SCORE_FN = _formula_score_fn()
+        if _FORMULA_SCORE_FN and progress_cb:
+            try:
+                progress_cb("SFT span scorer ready")
+            except Exception:
+                pass
+    except Exception:
+        pass
+FORMULA_CLS_ENABLE = True
+FORMULA_CLS_ALWAYS_REFRESH = True
+FORMULA_P_MIN = float(os.getenv("FORMULA_P_MIN", "0.80"))
+FORMULA_MIN_PROB = float(os.getenv("FORMULA_MIN_PROB", "0.45"))
+FORMULA_KEEP_FRAC = float(os.getenv("FORMULA_KEEP_FRAC", "0.50"))
+FORMULA_MIN_FORMULA_RATIO = float(os.getenv("FORMULA_MIN_FORMULA_RATIO", "0.25"))
+ASK_FORMULA_DEBUG = (os.getenv("ASK_FORMULA_DEBUG", "1").lower() in {"1","true","yes","on"})
 
 TEMPLATE = """You are a study assistant. Answer the question using ONLY the provided context.
 Start with a single bold sentence that directly answers the question. Then, if helpful, add short bullet points. Do not start the response with a bullet. Cite sources like [FileName.pdf p.3] or [FileName.pdf p.3–4].
@@ -36,6 +77,23 @@ Context:
 {ctx}
 """
 
+CANONICAL_FORMULA_TEMPLATE = """You are a formula librarian. From ONLY the provided extracted math spans and snippets, produce a concise list of the CANONICAL formulas, laws, rules, identities, and named theorems relevant to the user’s question. 
+Requirements:
+- Group by short category headers (e.g., Derivatives, Integrals, Trigonometry, Series, Linear Algebra, Probability, Logic), but only if present.
+- For each item: show a compact formula in inline code, then 3–12 words of label/meaning.
+- Prefer definitions/theorems/rules over worked examples or exercise prompts.
+- Exclude problem statements, instructions (prove/show/compute), and numeric plug‑ins for particular values.
+- Keep each item to one line. 8–20 total items is ideal.
+- Include page citations in the form [FileName.pdf p.N] pulled from the supplied context next to each item.
+- Do not invent formulas. If unsure, omit.
+
+User question:
+{q}
+
+Extracted spans (with sources):
+{ctx}
+"""
+
 SUMMARIES_PATH = pathlib.Path("artifacts") / "doc_summaries.jsonl"
 CTX_CHAR_BUDGET = 14000
 BATCH_CHAR_BUDGET = int(os.getenv("ASK_BATCH_CHAR_BUDGET", "12000"))
@@ -47,6 +105,9 @@ ASK_EXHAUSTIVE_DEFAULT = (os.getenv("ASK_EXHAUSTIVE","0").lower() in {"1","true"
 ASK_CANDIDATES_DEFAULT = int(os.getenv("ASK_CANDIDATES","300"))
 RERANKER_NAME_DEFAULT = os.getenv("ASK_RERANKER","off").lower()
 RERANK_TOP_N = int(os.getenv("ASK_RERANK_TOP_N","200"))
+ASK_RERANK_IN_FORMULA = (os.getenv("ASK_RERANK_IN_FORMULA","1").lower() in {"1","true","yes","on"})
+FORMULA_EXHAUSTIVE = (os.getenv("FORMULA_EXHAUSTIVE", "1").lower() in {"1","true","yes","on"})
+FORMULA_MAX_PER_PAGE = int(os.getenv("FORMULA_MAX_PER_PAGE", "200"))
 FORMULA_Q_WORDS = {"formula","formulas","identity","identities","equation","equations","rule","rules","laws","law"}
 FORMULA_POS_TERMS = {"formula","formulas","identity","identities","rule","rules","law","laws","property","properties","theorem","theorems","definition","definitions","summary","key formulas","double-angle","half-angle","sum","difference"}
 FORMULA_NEG_TERMS = {"exercise","exercises","problem","problems","example","examples","solution","solutions","answer","answers","practice","review"}
@@ -75,6 +136,10 @@ QUANT_RX        = re.compile(r"[∀∃]")
 SPECIAL_CONST_RX= re.compile(r"(π|phi|φ|\be\b)")
 FUNC_RX         = re.compile(r"\b(sin|cos|tan|cot|sec|csc|log|ln|exp|det|rank)\b", re.I)
 
+
+FORI_RX = re.compile(r"\bfor\s+i\s*=\s*\d", re.I)
+USING_RX = re.compile(r"^\s*using\b", re.I)
+
 _HF_PIPE = None
 _HF_NAME = None
 
@@ -86,6 +151,55 @@ MATH_PHRASES = {
     "angle addition","angle subtraction","unit circle","euler","complex exponential","radian","degree",
     "identity","identities","formula","formulas"
 }
+
+
+DOC_CODE_RX = re.compile(r"\b[A-Z]{2,}\d{2,}\b")
+
+def _doc_name(c):
+    return (c.get("doc_name") or "").strip()
+
+def _dominant_doc(chs):
+    counts = {}
+    for c in chs:
+        dn = _doc_name(c)
+        if dn:
+            counts[dn] = counts.get(dn, 0) + 1
+    if not counts:
+        return ""
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+def _target_doc_from_question(q, chs):
+    q = (q or "").strip()
+    m = DOC_CODE_RX.search(q)
+    if m:
+        code = m.group(0).lower()
+        for c in chs:
+            dn = _doc_name(c)
+            if code in dn.lower():
+                return dn
+    toks = [t for t in re.findall(r"[A-Za-z0-9_.-]{4,}", q)]
+    for c in chs:
+        dn = _doc_name(c)
+        for t in toks:
+            if t.lower() in dn.lower():
+                return dn
+    return ""
+
+def _scope_chunks(question, chs):
+    if not chs:
+        return chs
+    strict = os.getenv("ASK_STRICT_DOC", "1").lower() in {"1","true","yes","on"}
+    tgt = _target_doc_from_question(question, chs)
+    if not tgt:
+        tgt = _dominant_doc(chs)
+    if not tgt:
+        return chs
+    if strict:
+        return [c for c in chs if _doc_name(c) == tgt] or chs
+    pri, sec = [], []
+    for c in chs:
+        (pri if _doc_name(c) == tgt else sec).append(c)
+    return pri + sec
 
 def _page_num(c):
     for k in ("page","page_num","page_index","page_start"):
@@ -112,6 +226,31 @@ def _nfkc(s):
 def is_formula_query(q):
     s = (q or "").lower()
     return any(w in s for w in FORMULA_Q_WORDS)
+
+def _ensure_formula_labels(chunks, progress_cb=None):
+    if not chunks:
+        return chunks
+    if not HAS_FCLS:
+        return chunks
+    try:
+        info = getattr(formula_cls, "cls_info", lambda: {})() or {}
+        if info.get("loaded"):
+            tag = f"{info.get('base','')} + {info.get('adapter','')}"
+        else:
+            tag = "disabled"
+    except Exception:
+        tag = ""
+    need = []
+    for c in chunks:
+        cm = c.get("formula_model") or ""
+        if FORMULA_CLS_ALWAYS_REFRESH or ("is_formula" not in c) or (tag and cm != tag):
+            need.append(c)
+    if need:
+        try:
+            formula_cls.classify_chunks(need, progress_cb=progress_cb)
+        except Exception:
+            pass
+    return chunks
 
 def _split_lines_blocks(t):
     t = _nfkc(t)
@@ -156,6 +295,11 @@ def _digit_ratio(s):
     n = len(s2) or 1
     return d / n
 
+
+def _numiness(span):
+    nums = re.findall(r"\b\d+(?:\.\d+)?\b", span or "")
+    return len(set(nums))
+
 def _looks_binary(s):
     return bool(re.fullmatch(r"[01\s]{24,}", s or ""))
 
@@ -163,6 +307,10 @@ def _is_good_span(span, ctx_score):
     words = len(re.findall(r"[A-Za-z]{3,}", span))
     ops = len(re.findall(r"[=<>±∑∏∫√∞∇∂\^*/+\-|]", span))
     dens = ops / max(1, ops + words)
+    if FORI_RX.search(span):
+        return False
+    if _numiness(span) >= 3 and not re.search(r"[A-Za-zα-ωΑ-Ω]{2,}", span):
+        return False
     if _looks_binary(span) or _digit_ratio(span) > 0.7:
         return False
     if ctx_score <= -1 and dens < 0.45:
@@ -175,10 +323,19 @@ def _is_good_span(span, ctx_score):
     has_var = bool(re.search(r"[A-Za-zα-ωΑ-Ω]", span))
     if not (has_sym and has_var):
         return False
-    if HAS_FCLS and FORMULA_CLS_ENABLE:
+    if HAS_FCLS and _FORMULA_SCORE_FN is not None:
         try:
-            p = formula_score([span])[0]
-            if p < 0.60:
+            res = _FORMULA_SCORE_FN([span])
+            p = float(res[0]) if isinstance(res, (list, tuple)) else float(res)
+            if p < FORMULA_MIN_PROB:
+                return False
+        except Exception:
+            p = None
+    if ctx_score <= -1 and HAS_FCLS and _FORMULA_SCORE_FN is not None:
+        try:
+            res2 = _FORMULA_SCORE_FN([span])
+            p2 = float(res2[0]) if isinstance(res2, (list, tuple)) else float(res2)
+            if p2 < (FORMULA_MIN_PROB + 0.08):
                 return False
         except Exception:
             pass
@@ -194,69 +351,195 @@ def _dedup_ordered(items):
             out.append(x)
     return out
 
-def extract_formulas_from_chunks(chs, max_per_page=200, progress_cb=None, time_budget_sec=None, wants_explain=False):
+def _rows_to_context(rows, char_budget=14000):
+    parts = []
+    used = 0
+    rows2 = sorted(rows, key=lambda r: (r.get("source",""), r.get("page",0)))
+    for r in rows2:
+        line = f"{r.get('source','[?]')} {r.get('formula','')}"
+        line = re.sub(r"\s+", " ", line).strip()
+        if not line:
+            continue
+        if used + len(line) + 1 > char_budget:
+            break
+        parts.append(line)
+        used += len(line) + 1
+    return "\n".join(parts)
+
+def _canonicalize_formulas(question, rows):
+    cfg = load_config()
+    ctx = _rows_to_context(rows)
+    prompt = CANONICAL_FORMULA_TEMPLATE.format(q=question, ctx=ctx)
+    if cfg.get("OPENAI_API_KEY"):
+        sys = "Return only canonical formulas with labels and page citations; no examples."
+        text, _ = _openai_chat([{"role":"system","content":sys},{"role":"user","content":prompt}], max_new_tokens=700)
+    else:
+        full = "System: Return only canonical formulas with labels and page citations; no examples.\n" + prompt + "\nAssistant:"
+        text = _normalize_md(_hf_generate(full, max_new_tokens=700))
+    return text
+
+def extract_formulas_from_chunks(chs, max_per_page=FORMULA_MAX_PER_PAGE, progress_cb=None, time_budget_sec=None, wants_explain=False, exhaustive_scan=False):
+    if HAS_FCLS:
+        _maybe_init_sft(progress_cb)
+        if _FORMULA_SCORE_FN is not None:
+            try:
+                _FORMULA_SCORE_FN(["x = x"])
+            except Exception:
+                pass
     rows = []
+    diag = {"pages": 0, "spans": 0, "scored": 0, "kept": 0, "p_sum": 0.0, "skipped_no_hint": 0, "scanned": 0}
     total = len(chs)
     found = 0
+    if exhaustive_scan:
+        time_budget_sec = None
+        max_per_page = max_per_page if max_per_page and max_per_page > 0 else 1000
+
     t_end = time.time() + time_budget_sec if time_budget_sec and time_budget_sec > 0 else None
+    p_cache = {}
     for i, c in enumerate(chs):
+        diag["pages"] += 1
         if t_end and time.time() >= t_end:
             break
         t = c.get("text","") or ""
-        if not t or not FORMULA_HINT_RX.search(t):
+        if not t:
+            if progress_cb and (i % 50 == 0 or i == total - 1):
+                progress_cb(f"Scanning pages… {i+1}/{total} • formulas: {found}")
+            continue
+        hint_ok = bool(FORMULA_HINT_RX.search(t))
+        if not hint_ok and not exhaustive_scan:
+            diag["skipped_no_hint"] += 1
             if progress_cb and (i % 50 == 0 or i == total - 1):
                 progress_cb(f"Scanning pages… {i+1}/{total} • formulas: {found}")
             continue
         ctxs = _context_score(c)
         hp = (c.get("heading_path") or "")
         st = (c.get("section_tag") or "")
+        if st == "exercises":
+            ctxs -= 2
         if not wants_explain and (HEAD_VETO_RX.search(hp) or HEAD_VETO_RX.search(st)):
             if progress_cb and (i % 20 == 0 or i == total - 1):
                 progress_cb(f"Scanning pages… {i+1}/{total} • formulas: {found}")
             continue
         lines = _split_lines_blocks(t)
+        diag["scanned"] += 1
         kept = []
         for ln in lines:
             if not wants_explain and (BIB_HINT_RX.search(ln) or YEAR_RX.search(ln)):
                 continue
-            if PROMPT_PREFIX_RX.search(ln) and not wants_explain and not FORMULA_HINT_RX.search(ln):
-                continue
             if LINE_VETO_RX.search(ln):
                 continue
-            if EXERCISE_ANY_RX.search(ln) and not wants_explain and not FORMULA_HINT_RX.search(ln):
+            if USING_RX.search(ln):
+                continue
+            if QUESTION_RX.search(ln):
+                continue
+            if ENUM_RX.search(ln) and not re.search(r"[=≤≥≠≈∑∏∫√∞∇∂\^→↔⇔]", ln):
+                continue
+            if PROMPT_PREFIX_RX.search(ln) and not wants_explain and not re.search(r"[=≤≥≠≈∑∏∫√∞∇∂\^→↔⇔]", ln):
+                continue
+            if EXERCISE_ANY_RX.search(ln) and not wants_explain and not re.search(r"[=≤≥≠≈∑∏∫√∞∇∂\^→↔⇔]", ln):
                 continue
             spans = _extract_formula_spans(ln)
+            diag["spans"] += len(spans)
             if not spans:
                 continue
             for s in spans:
                 if _is_good_span(s, ctxs):
-                    extra = 0.0
-                    if HAS_FCLS and FORMULA_CLS_ENABLE:
+                    p = None
+                    if HAS_FCLS and _FORMULA_SCORE_FN is not None:
                         try:
-                            extra = 1.5 * formula_score([s])[0]
+                            if s in p_cache:
+                                p = p_cache[s]
+                            else:
+                                res = _FORMULA_SCORE_FN([s])
+                                p = float(res[0]) if isinstance(res, (list, tuple)) else float(res)
+                                p_cache[s] = p
+                            diag["scored"] += 1
+                            diag["p_sum"] += float(p)
                         except Exception:
-                            pass
-                    score = 2.0 + ctxs + extra + min(0.8, s.count("=")*0.3 + s.count("∑")*0.4 + s.count("∫")*0.4)
-                    kept.append((score, s))
+                            p = None
+                    sym = s.count("=")*0.35 + s.count("∑")*0.45 + s.count("∫")*0.45 + s.count("→")*0.25 + s.count("↔")*0.25
+                    sym = min(1.4, sym)
+                    lp = -0.15 if len(s) > 140 else 0.0
+                    base_ctx = 0.8 * ctxs
+                    if p is None:
+                        sc = 1.5 + base_ctx + sym + lp
+                    else:
+                        sc = 3.0 * p + base_ctx + sym + lp
+                    kept.append((sc, s))
+                    diag["kept"] += 1
                     if len(kept) >= max_per_page:
                         break
             if len(kept) >= max_per_page:
                 break
         if kept:
             kept.sort(key=lambda z: -z[0])
+            scored = kept
+            min_keep = max(1, int(len(scored) * FORMULA_KEEP_FRAC))
+            filter_by_prob = []
+            for sc, s in scored:
+                p = None
+                if HAS_FCLS and _FORMULA_SCORE_FN is not None:
+                    try:
+                        if s in p_cache:
+                            p = p_cache[s]
+                        else:
+                            res = _FORMULA_SCORE_FN([s])
+                            p = float(res[0]) if isinstance(res, (list, tuple)) else float(res)
+                            p_cache[s] = p
+                    except Exception:
+                        p = None
+                if p is not None:
+                    if p >= FORMULA_MIN_PROB:
+                        filter_by_prob.append((sc, s, p))
+                else:
+                    filter_by_prob.append((sc, s, None))
+            if len(filter_by_prob) < min_keep:
+                top_min = []
+                for i, (sc, s) in enumerate(scored):
+                    p = None
+                    if HAS_FCLS and _FORMULA_SCORE_FN is not None:
+                        try:
+                            if s in p_cache:
+                                p = p_cache[s]
+                            else:
+                                res = _FORMULA_SCORE_FN([s])
+                                p = float(res[0]) if isinstance(res, (list, tuple)) else float(res)
+                                p_cache[s] = p
+                        except Exception:
+                            p = None
+                    top_min.append((sc, s, p))
+                    if len(top_min) >= min_keep:
+                        break
+                final_kept = top_min
+            else:
+                final_kept = filter_by_prob
             src = _fmt_source(c)
             pg = _page_num(c)
-            for _, g in kept:
+            for _, g, _ in final_kept:
                 rows.append({"formula": g, "source": src, "page": pg})
-            found += len(kept)
+            found += len(final_kept)
         if progress_cb and (i % 20 == 0 or i == total - 1):
             progress_cb(f"Scanning pages… {i+1}/{total} • formulas: {found}")
-    return rows
+    if progress_cb:
+        try:
+            avg_p = (diag["p_sum"] / diag["scored"]) if diag["scored"] > 0 else 0.0
+            min_p = (min(p_cache.values()) if p_cache else 0.0)
+            label = "SFT" if (_FORMULA_SCORE_FN is not None) else "heuristics"
+            cov = f"coverage {diag['scanned']}/{total} pages (skipped_no_hint {diag['skipped_no_hint']})"
+            progress_cb(f"{label}: pages {diag['pages']} • spans {diag['spans']} • scored {diag['scored']} • kept {diag['kept']} • avg_p {avg_p:.3f} (min {min_p:.2f}, thresh {FORMULA_MIN_PROB:.2f}) • {cov}")
+        except Exception:
+            pass
+    return rows, diag
 
 def summarize_all_formulas(question, chunks, progress_cb=None, exhaustive=None, time_budget_sec=None):
     if exhaustive is None:
-        exhaustive = (os.environ.get("ASK_EXHAUSTIVE","false").lower() in {"1","true","yes","on"})
-    tb = time_budget_sec if time_budget_sec else int(os.environ.get("ASK_TIME_BUDGET_SEC","120"))
+        exhaustive = (os.environ.get("ASK_EXHAUSTIVE","false").lower() in {"1","true","yes","on"}) or FORMULA_EXHAUSTIVE
+
+    if exhaustive:
+        tb = None
+    else:
+        tb = time_budget_sec if time_budget_sec else int(os.environ.get("ASK_TIME_BUDGET_SEC","120"))
+
     base = list(chunks)
     if exhaustive:
         try:
@@ -268,30 +551,59 @@ def summarize_all_formulas(question, chunks, progress_cb=None, exhaustive=None, 
                     progress_cb(f"Formula mode: exhaustive scan of {len(base)} chunks")
         except Exception:
             pass
+
+    base = _scope_chunks(question, base)
+    base = _ensure_formula_labels(base, progress_cb)
+    total_scoped = len(base)
+    labeled = [c for c in base if c.get("is_formula")]
+    if total_scoped > 0 and len(labeled) / total_scoped < FORMULA_MIN_FORMULA_RATIO:
+        extras = []
+        for c in base:
+            t = c.get("text", "") or ""
+            hp = (c.get("heading_path") or "").lower()
+            if c in labeled:
+                continue
+            if c.get("has_math"):
+                extras.append(c); continue
+            if FORMULA_HINT_RX.search(t):
+                extras.append(c); continue
+            if any(w in hp for w in ("formula", "formulas", "identity", "identities", "theorem", "rule", "laws")):
+                extras.append(c); continue
+        base = labeled + [x for x in extras if x not in labeled]
+        if progress_cb:
+            try:
+                progress_cb(f"Formula fallback engaged: {len(labeled)}/{total_scoped} labeled; added {len(base)-len(labeled)} extras")
+            except Exception:
+                pass
+    else:
+        base = labeled
+    if not base:
+        return {"answer":"Not found in sources.", "citations":[], "quotes":[]}
+
     eq_non = [c for c in base if c.get("is_equation") and (c.get("section_tag") or "") != "exercises"]
     eq_ex  = [c for c in base if c.get("is_equation") and (c.get("section_tag") or "") == "exercises"]
     ma_non = [c for c in base if not c.get("is_equation") and c.get("has_math") and (c.get("section_tag") or "") != "exercises"]
     ma_ex  = [c for c in base if not c.get("is_equation") and c.get("has_math") and (c.get("section_tag") or "") == "exercises"]
+
     ordered = eq_non + ma_non + eq_ex + ma_ex
+    try:
+        use_name = RERANKER_NAME_DEFAULT if RERANKER_NAME_DEFAULT not in {"", "off", "none"} else "minilm"
+        rer_idx = _rerank(question, ordered, name=use_name, top_n=RERANK_TOP_N)
+        ordered = [ordered[i] for i in rer_idx]
+    except Exception:
+        pass
     ask = (question or "").lower()
     wants_explain = any(k in ask for k in ("explain","why","derive","derivation","proof","prove","show"))
-    rows = extract_formulas_from_chunks(ordered, progress_cb=progress_cb, time_budget_sec=tb, wants_explain=wants_explain)
+    rows, diag = extract_formulas_from_chunks(ordered, progress_cb=progress_cb, time_budget_sec=tb, wants_explain=wants_explain, exhaustive_scan=exhaustive)
     if not rows:
         return {"answer":"Not found in sources.", "citations":[], "quotes":[]}
-    rows.sort(key=lambda r: r.get("page", 0))
-    by_src = {}
-    for r in rows:
-        by_src.setdefault(r["source"], []).append(r["formula"])
-    parts = ["**Formulas found**"]
-    def _pg(s):
-        m = re.search(r"p\.(\d+)", s)
-        return int(m.group(1)) if m else 0
-    for src in sorted(by_src.keys(), key=_pg):
-        fs = _dedup_ordered(by_src[src])
-        parts.append(f"\n- {src}")
-        for f in fs[:50]:
-            parts.append(f"  - `{f}`")
-    return {"answer":"\n".join(parts), "citations":_dedup_ordered(list(by_src.keys())), "quotes":[]}
+    rows.sort(key=lambda r: (r.get("source",""), r.get("page",0)))
+    answer = _canonicalize_formulas(question, rows)
+    cites = _dedup_ordered([r.get("source","") for r in rows])[:15]
+    if ASK_FORMULA_DEBUG:
+        cov = f"Coverage {diag.get('scanned',0)}/{len(ordered)} pages; skipped_no_hint {diag.get('skipped_no_hint',0)}"
+        answer += "\n\n_Diagnostics: SFT filtering active; {}. Min prob = {:.2f}_".format(cov, FORMULA_P_MIN)
+    return {"answer": answer, "citations": cites, "quotes": []}
 
 def _normalize_md(s):
     s = s.strip().replace("\u00a0", " ")
@@ -343,25 +655,61 @@ def _filter_chunks(chs):
         out.append(c)
     return out
 
-def _rerank(question, chs, name=RERANKER_NAME_DEFAULT, top_n=RERANK_TOP_N):
-    tag = (name or "off").lower().strip()
-    if tag in {"off","none",""}:
-        return list(range(len(chs)))
+
+_RERANKER = {"name": None, "ce": None}
+
+def _load_cross_encoder(tag):
     try:
+        import os
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
         import torch
+        try:
+            torch.set_num_threads(int(os.getenv("RERANK_THREADS", "1")))
+        except Exception:
+            pass
         from sentence_transformers import CrossEncoder
         model_map = {
             "minilm": "cross-encoder/ms-marco-MiniLM-L-6-v2",
             "bge-m3": "BAAI/bge-reranker-v2-m3",
             "bge-base": "BAAI/bge-reranker-base",
-            "bge-large": "BAAI/bge-reranker-large"
+            "bge-large": "BAAI/bge-reranker-large",
         }
         mname = model_map.get(tag, tag)
-        ce = CrossEncoder(mname, device="cuda" if torch.cuda.is_available() else "cpu")
-        cut = min(len(chs), top_n)
-        pairs = [[question, re.sub(r"\s+"," ", chs[i]["text"]).strip()[:600]] for i in range(cut)]
+        ce = CrossEncoder(mname, device="cpu")
+        return ce, mname
+    except Exception:
+        return None, None
+
+
+def _rerank(question, chs, name=RERANKER_NAME_DEFAULT, top_n=RERANK_TOP_N):
+    tag = (name or "off").lower().strip()
+    if tag in {"off", "none", ""}:
+        return list(range(len(chs)))
+    try:
+        if _RERANKER["ce"] is None or _RERANKER["name"] != tag:
+            ce, mname = _load_cross_encoder(tag)
+            if ce is None:
+                return list(range(len(chs)))
+            _RERANKER["ce"] = ce
+            _RERANKER["name"] = tag
+        ce = _RERANKER["ce"]
+        cut = min(len(chs), max(1, int(top_n)))
+        pairs = []
+        for i in range(cut):
+            t = chs[i].get("text", "")
+            t = re.sub(r"\s+", " ", t).strip()[:800]
+            if not t:
+                t = "(empty)"
+            pairs.append([question, t])
+        if not pairs:
+            return list(range(len(chs)))
         scores = ce.predict(pairs)
-        order = list(np.argsort(-np.array(scores)))
+        try:
+            import numpy as _np
+            order = list(_np.argsort(-_np.array(scores)))
+        except Exception:
+            order = list(range(len(pairs)))
+            order.sort(key=lambda i: float(scores[i]) if i < len(scores) else 0.0, reverse=True)
         rest = list(range(cut, len(chs)))
         return order + rest
     except Exception:
@@ -629,8 +977,9 @@ def _batch_chunks(chs, budget_chars):
 
 def summarize(question, top_chunks, history=None):
     cfg = load_config()
-    filtered = _filter_chunks(top_chunks)
-    used = filtered if filtered else list(top_chunks)
+    scoped = _scope_chunks(question, top_chunks)
+    filtered = _filter_chunks(scoped)
+    used = filtered if filtered else list(scoped)
     if not used:
         return {"answer": "Not found in sources.", "citations": [], "quotes": []}
     terms = ", ".join(_keywords(question))
@@ -671,8 +1020,9 @@ def summarize(question, top_chunks, history=None):
 
 def summarize_batched(question, chunks, history=None, progress_cb=None, max_batches=None, time_budget_sec=None, exhaustive=None):
     cfg = load_config()
-    filtered = _filter_chunks(chunks)
-    base = filtered if filtered else list(chunks)
+    scoped = _scope_chunks(question, chunks)
+    filtered = _filter_chunks(scoped)
+    base = filtered if filtered else list(scoped)
     if not base:
         return {"answer": "Not found in sources.", "citations": [], "quotes": []}
     if max_batches is None:
