@@ -122,9 +122,3 @@ This project is intended to demonstrate applied skills in:
 - ONNX runtime deployment for lightweight inference  
 - Designing hybrid systems combining symbolic and neural methods  
 - Full-stack development: API design, GUI design, and backend architecture  
-
----
-
-## License  
-
-MIT License. See [LICENSE](LICENSE) for details.  
