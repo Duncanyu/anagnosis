@@ -1,32 +1,34 @@
 # Anagnosis  
 
-**AI-powered document intelligence for research and knowledge synthesis**  
+**AI-powered document intelligence for university students and researchers**  
 
-Anagnosis is an advanced **retrieval-augmented generation (RAG)** system built for academic and technical workflows. It combines **multi-strategy PDF parsing**, **AI-driven formula recognition**, and **semantic retrieval** into a single platform that transforms unstructured documents into structured, citation-ready knowledge.  
+Anagnosis is a project designed to help students, researchers, and academics work more effectively with complex documents. Instead of skimming hundreds of pages or losing track of formulas buried in PDFs, Anagnosis transforms unstructured academic files into searchable, citation-ready knowledge.  
 
-> ⚠️ **Status:** Work in Progress — this project is unfinished and under active development. It is primarily a demonstration of technical skill, not a production-ready tool.  
+Built on top of a custom **retrieval-augmented generation (RAG)** pipeline, it integrates **multi-strategy document parsing, AI-driven formula recognition, semantic retrieval, and conversation memory** into a single workflow. The goal is simple: reduce time wasted searching and increase time spent understanding.  
+
+> ⚠️ **Status:** Work in Progress — this is not a finished tool. It’s an experimental project that also serves as a demonstration of applied skills in RAG, LLM orchestration, reranking, ONNX deployment, and system design.  
 
 ---
 
-## Features  
+## Project Objectives  
 
-- **Multi-Strategy Parsing**  
-  PyMuPDF, PDFMiner, and Poppler with OCR fallback (Tesseract), glyph mapping, and error recovery.  
+- Make dense academic PDFs easier to navigate.  
+- Provide **citation-ready answers** backed by page references.  
+- Build automatic **formula sheets** by extracting mathematical content.  
+- Enable **semantic search** across lecture notes, research papers, and textbooks.  
+- Create a **persistent conversation layer** so follow-up questions keep context.  
+- Deliver knowledge through both a **desktop GUI** and an **API server**.  
 
-- **Formula Intelligence**  
-  ONNX-based MiniLM classifier, formula mode, context-aware extraction, canonical LaTeX export.  
+---
 
-- **Semantic Retrieval**  
-  FAISS vector search, embeddings, MMR ordering, SFT-based reranking, cross-encoder integration.  
+## Key Features  
 
-- **Chunking & Embeddings**  
-  Structure-preserving segmentation with heading hierarchy, math/table detection, and token overlap control.  
-
-- **Conversation Memory**  
-  Persistent context across queries, intelligent pruning, and context-aware assembly.  
-
-- **API + GUI**  
-  REST endpoints via FastAPI and a PySide6 desktop interface.  
+- **Document Parsing**: PyMuPDF, PDFMiner, Poppler, and OCR fallback with glyph recovery.  
+- **Formula Intelligence**: ONNX-based MiniLM classifier, formula mode, canonical LaTeX export.  
+- **Semantic Retrieval**: FAISS embeddings, MMR ordering, SFT reranking, cross-encoder integration.  
+- **Chunking & Embeddings**: Structure-preserving segmentation, math/table detection, token overlap control.  
+- **Conversation Memory**: Persistent history with intelligent pruning.  
+- **APIs & Interfaces**: REST endpoints (FastAPI) and PySide6 GUI.  
 
 ---
 
@@ -38,13 +40,13 @@ flowchart TD
   subgraph A["📥 Ingestion Layer"]
     A1["PDF/Image Upload"] --> A2["Multi-Strategy Parser"]
     A2 --> A3["PyMuPDF / PDFMiner / Poppler"]
-    A2 --> A4["OCR Recovery (Tesseract)"]
+    A2 --> A4["OCR Recovery"]
     A2 --> A5["Glyph Mapping & Span Salvage"]
   end
 
   subgraph B["🧩 Processing"]
     A2 --> B1["Semantic Chunking"]
-    B1 --> B2["Heading Hierarchy & Structure"]
+    B1 --> B2["Heading Hierarchy"]
     B1 --> B3["Math/Table Detection"]
     B1 --> B4["Token Management"]
     B1 --> F1["Formula Classifier (ONNX MiniLM)"]
@@ -89,36 +91,29 @@ flowchart TD
 
 ## Tech Stack  
 
-- **Retrieval-Augmented Generation (RAG)** pipeline with FAISS + MMR + reranking  
+- **RAG pipeline** with FAISS + MMR + cross-encoder reranking  
 - **LLMs**: OpenAI GPT, HuggingFace backends, vLLM server support  
-- **SFT reranking**: Supervised fine-tuned models for relevance optimization  
-- **Formula Classification**: Custom ONNX MiniLM model for mathematical content  
-- **OCR**: Tesseract with math-aware configurations  
-- **Chunking**: Semantic, structure-preserving segmentation  
-- **APIs & Interfaces**: FastAPI backend and PySide6 desktop GUI  
+- **SFT reranking**: Supervised fine-tuned relevance models  
+- **Formula classification**: ONNX Runtime (MiniLM custom model)  
+- **OCR**: Tesseract-based fallback with math-aware configs  
+- **Embeddings**: HuggingFace SentenceTransformers  
+- **Interfaces**: FastAPI REST API + PySide6 GUI  
 
 ---
 
 ## Current Status  
 
-- Multi-strategy document parsing with OCR fallback  
-- Formula classification via ONNX MiniLM model  
-- FAISS-based semantic retrieval + reranking  
-- Persistent conversation memory  
-- GUI + REST API available  
-- Citation-ready responses  
+- Document parsing pipeline in place with OCR fallbacks  
+- Formula detection and classification working with ONNX model  
+- Semantic retrieval with FAISS index + reranking enabled  
+- Basic GUI and REST API functional  
+- Citation-ready outputs available  
+- Conversation memory system integrated  
 
 ---
 
-## Purpose  
+## Why This Matters  
 
-This project is intended to demonstrate applied skills in:  
+University students and researchers often face the same problem: too much material, too little time. Traditional search is keyword-based and fails on PDFs filled with equations, tables, and diagrams. Anagnosis shows how modern **AI, embeddings, and retrieval techniques** can be used to bridge that gap — surfacing formulas, definitions, and explanations directly when needed.  
 
-- Retrieval-augmented generation (RAG) design  
-- Large Language Model (LLM) orchestration  
-- Supervised Fine-Tuning (SFT) and reranking integration  
-- Embedding pipelines with FAISS and semantic search  
-- Multi-strategy document parsing and OCR recovery  
-- ONNX runtime deployment for lightweight inference  
-- Designing hybrid systems combining symbolic and neural methods  
-- Full-stack development: API design, GUI design, and backend architecture  
+This project is both a **practical tool-in-progress** for academic life and a **demonstration of technical skills** in advanced AI system design.  
