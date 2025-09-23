@@ -5,6 +5,26 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+def load_icon(name: str, fallback: QtGui.QIcon | None = None) -> QtGui.QIcon:
+    try:
+        if "." in name:
+            fnames = [name]
+        else:
+            fnames = [f"{name}.icns", f"{name}.png", f"{name}.ico", f"{name}.svg"]
+        roots = [
+            ROOT / "assets",
+            ROOT / "app" / "assets",
+            pathlib.Path.cwd() / "assets"
+        ]
+        for root in roots:
+            for fn in fnames:
+                p = root / fn
+                if p.exists():
+                    return QtGui.QIcon(str(p))
+    except Exception:
+        pass
+    return fallback or QtGui.QIcon()
+
 try:
     import markdown as mdlib
 except Exception:
@@ -20,7 +40,7 @@ from api.services import aliases
 from api.core.config import save_secret, present_keys, load_config
 
 
-APP_TITLE = "Anagnosis"
+APP_TITLE = "ANAGNOSIS"
 PREFS_PATH = pathlib.Path("artifacts") / "ui_prefs.json"
 
 def as_bool(x):
@@ -70,18 +90,25 @@ class IngestWorker(QtCore.QThread):
             pass
         self.progress.emit(s)
 
+    def _check_cancel(self):
+        if self.isInterruptionRequested():
+            raise RuntimeError("Cancelled")
+
     def run(self):
         try:
+            self._check_cancel()
             summaries, details, total_chunks = [], [], 0
             emb = embedding_info(); self.progress.emit(f"Embedding: {emb['backend']} ({emb['model']})")
             sumi = summarizer_info(); self.progress.emit(f"Summarizer: {sumi['backend']}")
             for p in self.paths:
+                self._check_cancel()
                 self.progress.emit(f"Loading {p.name}…")
                 self.progress_pct.emit(2)
                 data = p.read_bytes()
 
                 self.progress.emit("Parsing document…")
                 parsed = parse_any_bytes(p.name, data, progress_cb=self.progress.emit)
+                self._check_cancel()
                 self.progress_pct.emit(15)
 
                 ocr_list = parsed.get("ocr_page_numbers") or []
@@ -111,11 +138,16 @@ class IngestWorker(QtCore.QThread):
                 for page in parsed["pages"]:
                     page["doc_name"] = p.name
 
+                self._check_cancel()
                 self.progress.emit("Chunking…")
+                self._check_cancel()
                 chunks = chunk_pages(parsed["pages"])
+                self._check_cancel()
                 self.progress_pct.emit(35)
 
                 def embed_cb(done, total):
+                    if self.isInterruptionRequested():
+                        raise RuntimeError("Cancelled")
                     base = 35
                     span = 55
                     pct = base + int(span * (done / max(1, total)))
@@ -123,12 +155,15 @@ class IngestWorker(QtCore.QThread):
                     self.progress_pct.emit(pct)
 
                 self.progress.emit("Embedding and indexing…")
+                self._check_cancel()
                 add_chunks(chunks, progress_cb=embed_cb)
+                self._check_cancel()
                 self.progress_pct.emit(96)
 
                 total_chunks += len(chunks)
 
                 self.progress.emit("Summarizing…")
+                self._check_cancel()
                 docsum = summarize_document(chunks)
                 self.progress_pct.emit(100)
 
@@ -160,9 +195,14 @@ class AskWorker(QtCore.QThread):
         self.k = k
         self.history = history
         self.formula_mode = formula_mode
-        
+    
+    def _check_cancel(self):
+        if self.isInterruptionRequested():
+            raise RuntimeError("Cancelled")
+
     def run(self):
         try:
+            self._check_cancel()
             self.progress.emit("Searching index…")
             self.progress_pct.emit(10)
 
@@ -181,7 +221,9 @@ class AskWorker(QtCore.QThread):
             if self.formula_mode:
                 st = int(os.environ.get("SEARCH_TIMEOUT_SEC_FORMULA", str(max(20, min(tb//2, 60)))))
 
+            self._check_cancel()
             hits = search(self.question, k=pool, progress_cb=s_cb, timeout_sec=st, pool=pool)
+            self._check_cancel()
             self.progress.emit(f"Hits: {len(hits)}")
             if not hits:
                 self.progress_pct.emit(100)
@@ -191,11 +233,14 @@ class AskWorker(QtCore.QThread):
             top_chunks = [h[1] for h in hits]
 
             if self.formula_mode:
+                self._check_cancel()
                 self.progress.emit("Formula mode: extracting all formulas in scope…")
                 total = len(top_chunks)
                 if total < pool:
                     self.progress.emit(f"Warning: only {total} / {pool} chunks returned; consider increasing index size or candidate pool.")
                 def p_cb(msg):
+                    if self.isInterruptionRequested():
+                        raise RuntimeError("Cancelled")
                     self.progress.emit(msg)
                     m = re.search(r"(\d+)\s*/\s*(\d+)", msg)
                     if m:
@@ -205,6 +250,7 @@ class AskWorker(QtCore.QThread):
                         self.progress_pct.emit(pct)
                 out = summarize_all_formulas(self.question, top_chunks, progress_cb=p_cb)
             else:
+                self._check_cancel()
                 self.progress.emit("Summarizing with context…")
                 self.progress_pct.emit(60)
                 mb = int(os.environ.get("ASK_MAX_BATCHES","6"))
@@ -217,6 +263,7 @@ class AskWorker(QtCore.QThread):
                         sc, ch = 0.0, h[1] if isinstance(h, (list, tuple)) and len(h) > 1 else h
                     x = dict(ch); x["_score"] = float(sc) if sc is not None else 0.0
                     chs.append(x)
+                self._check_cancel()
                 out = summarize_batched(self.question, chs, history=self.history, progress_cb=lambda s: self.progress.emit(s), max_batches=mb, time_budget_sec=tb, exhaustive=exh)
 
             self.progress_pct.emit(100)
@@ -232,7 +279,6 @@ class SettingsDialog(QtWidgets.QDialog):
         self.setModal(True)
         cfg = load_config()
         prefs = read_prefs()
-        form = QtWidgets.QFormLayout()
 
         self.openai = QtWidgets.QLineEdit(cfg.get("OPENAI_API_KEY") or "")
         self.openai.setEchoMode(QtWidgets.QLineEdit.Password)
@@ -273,23 +319,6 @@ class SettingsDialog(QtWidgets.QDialog):
         self.openai_rpm.setSingleStep(100)
         self.openai_rpm.setValue(int(prefs.get("OPENAI_RPM", os.environ.get("OPENAI_RPM", "0"))))
 
-        self.ask_time = QtWidgets.QSpinBox()
-        self.ask_time.setRange(10, 18000)
-        self.ask_time.setSingleStep(10)
-        self.ask_time.setValue(int(prefs.get("ASK_TIME_BUDGET_SEC", os.environ.get("ASK_TIME_BUDGET_SEC", "120"))))
-
-        self.ask_exhaustive = QtWidgets.QCheckBox()
-        self.ask_exhaustive.setChecked(as_bool(prefs.get("ASK_EXHAUSTIVE", os.environ.get("ASK_EXHAUSTIVE","false"))))
-
-        self.ask_candidates = QtWidgets.QSpinBox()
-        self.ask_candidates.setRange(10, 5000)
-        self.ask_candidates.setSingleStep(10)
-        self.ask_candidates.setValue(int(prefs.get("ASK_CANDIDATES", os.environ.get("ASK_CANDIDATES","300"))))
-
-        self.ask_reranker = QtWidgets.QComboBox()
-        self.ask_reranker.addItems(["off","minilm","bge-m3","bge-base","bge-large"])
-        self.ask_reranker.setCurrentText((prefs.get("ASK_RERANKER", os.environ.get("ASK_RERANKER","off"))).lower())
-
         self.ask_batch_chars = QtWidgets.QSpinBox()
         self.ask_batch_chars.setRange(2000, 60000)
         self.ask_batch_chars.setSingleStep(1000)
@@ -309,34 +338,46 @@ class SettingsDialog(QtWidgets.QDialog):
         self.mem_mb.setAccelerated(True)
         self.openai_tpm.setAccelerated(True)
         self.openai_rpm.setAccelerated(True)
-        self.ask_time.setAccelerated(True)
         self.ask_batch_chars.setAccelerated(True)
         self.ask_max_batches.setAccelerated(True)
-        self.ask_candidates.setAccelerated(True)
 
-        form.addRow("OPENAI_API_KEY", self.openai)
-        form.addRow("HF_TOKEN", self.hf)
-        form.addRow("OpenAI chat model", self.openai_model)
-        form.addRow("HF LLM name", self.hf_name)
-        form.addRow("Embedding backend", self.embed_backend)
-        form.addRow("LLM backend", self.llm_backend)
-        form.addRow("Memory enabled", self.mem_enable)
-        form.addRow("Memory token limit", self.mem_tokens)
-        form.addRow("Memory file limit (MB)", self.mem_mb)
-        form.addRow("OPENAI_TPM", self.openai_tpm)
-        form.addRow("OPENAI_RPM", self.openai_rpm)
-        form.addRow("Ask time budget (sec)", self.ask_time)
-        form.addRow("Ask batch char budget", self.ask_batch_chars)
-        form.addRow("Ask max batches", self.ask_max_batches)
-        form.addRow("Exhaustive sweep", self.ask_exhaustive)
-        form.addRow("Candidate pool size", self.ask_candidates)
-        form.addRow("Reranker", self.ask_reranker)
+        tabs = QtWidgets.QTabWidget()
+
+        keys_w = QtWidgets.QWidget()
+        keys_form = QtWidgets.QFormLayout(keys_w)
+        keys_form.addRow("OPENAI_API_KEY", self.openai)
+        keys_form.addRow("HF_TOKEN", self.hf)
+        tabs.addTab(keys_w, "Keys")
+
+        models_w = QtWidgets.QWidget()
+        models_form = QtWidgets.QFormLayout(models_w)
+        models_form.addRow("OpenAI chat model", self.openai_model)
+        models_form.addRow("HF LLM name", self.hf_name)
+        models_form.addRow("Embedding backend", self.embed_backend)
+        models_form.addRow("LLM backend", self.llm_backend)
+        tabs.addTab(models_w, "Models")
+
+        mem_w = QtWidgets.QWidget()
+        mem_form = QtWidgets.QFormLayout(mem_w)
+        mem_form.addRow("Memory enabled", self.mem_enable)
+        mem_form.addRow("Memory token limit", self.mem_tokens)
+        mem_form.addRow("Memory file limit (MB)", self.mem_mb)
+        tabs.addTab(mem_w, "Memory")
+
+        limits_w = QtWidgets.QWidget()
+        limits_form = QtWidgets.QFormLayout(limits_w)
+        limits_form.addRow("OPENAI_TPM", self.openai_tpm)
+        limits_form.addRow("OPENAI_RPM", self.openai_rpm)
+        limits_form.addRow("Ask batch char budget", self.ask_batch_chars)
+        limits_form.addRow("Ask max batches", self.ask_max_batches)
+        tabs.addTab(limits_w, "Budgets")
 
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.save)
         buttons.rejected.connect(self.reject)
+
         lay = QtWidgets.QVBoxLayout(self)
-        lay.addLayout(form)
+        lay.addWidget(tabs)
         lay.addWidget(buttons)
     def save(self):
         if self.openai.text().strip():
@@ -353,16 +394,9 @@ class SettingsDialog(QtWidgets.QDialog):
         prefs["MEMORY_FILE_LIMIT_MB"] = int(self.mem_mb.value())
         prefs["OPENAI_TPM"] = int(self.openai_tpm.value())
         prefs["OPENAI_RPM"] = int(self.openai_rpm.value())
-        prefs["ASK_TIME_BUDGET_SEC"] = int(self.ask_time.value())
         prefs["ASK_BATCH_CHAR_BUDGET"] = int(self.ask_batch_chars.value())
         prefs["ASK_MAX_BATCHES"] = int(self.ask_max_batches.value())
-        prefs["ASK_EXHAUSTIVE"] = "true" if self.ask_exhaustive.isChecked() else "false"
-        prefs["ASK_CANDIDATES"] = int(self.ask_candidates.value())
-        prefs["ASK_RERANKER"] = self.ask_reranker.currentText()
         write_prefs(prefs)
-        os.environ["ASK_EXHAUSTIVE"] = prefs["ASK_EXHAUSTIVE"]
-        os.environ["ASK_CANDIDATES"] = str(prefs["ASK_CANDIDATES"])
-        os.environ["ASK_RERANKER"] = prefs["ASK_RERANKER"]
         os.environ["MEMORY_ENABLED"] = prefs["MEMORY_ENABLED"]
         os.environ["MEMORY_TOKEN_LIMIT"] = str(prefs["MEMORY_TOKEN_LIMIT"])
         os.environ["OPENAI_CHAT_MODEL"] = self.openai_model.text().strip() or "gpt-4o-mini"
@@ -370,7 +404,6 @@ class SettingsDialog(QtWidgets.QDialog):
         os.environ["MEMORY_FILE_LIMIT_MB"] = str(prefs["MEMORY_FILE_LIMIT_MB"])
         os.environ["OPENAI_TPM"] = str(prefs["OPENAI_TPM"])
         os.environ["OPENAI_RPM"] = str(prefs["OPENAI_RPM"])
-        os.environ["ASK_TIME_BUDGET_SEC"] = str(prefs["ASK_TIME_BUDGET_SEC"])
         os.environ["ASK_BATCH_CHAR_BUDGET"] = str(prefs["ASK_BATCH_CHAR_BUDGET"])
         os.environ["ASK_MAX_BATCHES"] = str(prefs["ASK_MAX_BATCHES"])
         self.accept()
@@ -380,11 +413,37 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
         self.resize(1000, 720)
+        app_icon = load_icon('icon.png')
+        if not app_icon.isNull():
+            self.setWindowIcon(app_icon)
+        cfg = load_config()
+        prefs = read_prefs()
+        self.memory_enabled = as_bool(prefs.get("MEMORY_ENABLED", os.environ.get("MEMORY_ENABLED", cfg.get("MEMORY_ENABLED") or "0")))
+        self.memory_token_limit = int(prefs.get("MEMORY_TOKEN_LIMIT", os.environ.get("MEMORY_TOKEN_LIMIT", cfg.get("MEMORY_TOKEN_LIMIT") or 1200)))
+        self.memory_file_limit_mb = int(prefs.get("MEMORY_FILE_LIMIT_MB", os.environ.get("MEMORY_FILE_LIMIT_MB", cfg.get("MEMORY_FILE_LIMIT_MB") or 50)))
+        self.history = mem.load_recent(self.memory_token_limit) if self.memory_enabled else []
+        self.history_limit = 1000
 
         tb = self.addToolBar("Main")
+        brand = QtWidgets.QWidget()
+        b_lay = QtWidgets.QHBoxLayout(brand); b_lay.setContentsMargins(6,0,12,0); b_lay.setSpacing(6)
+        ic = load_icon('icon') or load_icon('icon.png')
+        ic_lbl = QtWidgets.QLabel()
+        if not ic.isNull():
+            ic_lbl.setPixmap(ic.pixmap(18, 18))
+        title_lbl = QtWidgets.QLabel(APP_TITLE)
+        title_lbl.setStyleSheet('font-weight:600; letter-spacing:0.5px;')
+        b_lay.addWidget(ic_lbl); b_lay.addWidget(title_lbl)
+        tb.addWidget(brand)
         act_settings = QtGui.QAction("Settings", self)
         act_settings.triggered.connect(self.open_settings)
         tb.addAction(act_settings)
+
+        act_shortcuts = QtGui.QAction("Keyboard Shortcuts", self)
+        shortcut_str = "Meta+/" if sys.platform == "darwin" else "Ctrl+/"
+        act_shortcuts.setShortcut(QtGui.QKeySequence(shortcut_str))
+        act_shortcuts.triggered.connect(self.show_shortcuts)
+        tb.addAction(act_shortcuts)
         def do_clear():
             if QtWidgets.QMessageBox.question(self, "Clear index", "Delete all indexed chunks?") == QtWidgets.QMessageBox.Yes:
                 clear_index()
@@ -453,13 +512,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_prog.hide()
         self.status.addPermanentWidget(self.status_prog)
 
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        self.cancel_btn.setEnabled(True)
+        self.cancel_btn.hide()
+        self.cancel_btn.clicked.connect(self.cancel_current)
+        self.status.addPermanentWidget(self.cancel_btn)
+
         self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setTabPosition(QtWidgets.QTabWidget.North)
+        self.tabs.setMovable(True)
+        self.tabs.setElideMode(QtCore.Qt.ElideRight)
+        self._apply_tab_style()
         self.setCentralWidget(self.tabs)
 
         ingest = QtWidgets.QWidget()
         v1 = QtWidgets.QVBoxLayout(ingest)
         self.pick_btn = QtWidgets.QPushButton("Choose files…")
         self.pick_btn.clicked.connect(self.choose_files)
+        self.pick_btn.setFocusPolicy(QtCore.Qt.NoFocus)
         self.ingest_btn = QtWidgets.QPushButton("Ingest")
         self.ingest_btn.clicked.connect(self.ingest_docs)
         self.ingest_btn.setEnabled(False)
@@ -485,40 +556,238 @@ class MainWindow(QtWidgets.QMainWindow):
         self.k_spin = QtWidgets.QSpinBox()
         self.k_spin.setRange(1, 500)
         self.k_spin.setValue(10)
+
         self.formula_cb = QtWidgets.QCheckBox("Formula mode")
         prefs = read_prefs()
         self.formula_cb.setChecked(as_bool(prefs.get("ASK_FORMULA_FORCE", os.environ.get("ASK_FORMULA_FORCE", "0"))))
+
         self.strict_cb = QtWidgets.QCheckBox("Only this document")
         self.strict_cb.setChecked(as_bool(prefs.get("ASK_STRICT_DOC", os.environ.get("ASK_STRICT_DOC", "0"))))
+
+        self.formula_cb.setToolTip("Extract canonical formulas only; uses the SFT classifier and stricter filtering.")
+        self.strict_cb.setToolTip("Restrict retrieval to the currently referenced PDF only.")
+
         controls = QtWidgets.QHBoxLayout()
-        controls.addWidget(QtWidgets.QLabel("Top-k:"))
-        controls.addWidget(self.k_spin)
-        controls.addWidget(self.formula_cb)
+        controls.setContentsMargins(0, 0, 0, 0)
         controls.addWidget(self.strict_cb)
+        controls.addWidget(self.formula_cb)
         controls.addStretch(1)
 
-        self.answer = QtWidgets.QTextEdit()
+        group_box = QtWidgets.QGroupBox("Quick settings")
+        group_box.setFlat(True)
+        group_box.setStyleSheet(
+            """
+            QGroupBox { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; margin-top: 18px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 2px 6px; background: transparent; }
+            """
+        )
+        quick_layout = QtWidgets.QHBoxLayout(group_box)
+        quick_layout.setContentsMargins(8, 8, 8, 8)
+
+        quick_layout.addWidget(QtWidgets.QLabel("Top-k:"))
+        quick_layout.addWidget(self.k_spin)
+        quick_layout.addSpacing(12)
+
+        self.reranker_combo = QtWidgets.QComboBox()
+        self.reranker_combo.addItems(["off","minilm","bge-m3","bge-base","bge-large"])
+        self.reranker_combo.setCurrentText((prefs.get("ASK_RERANKER", os.environ.get("ASK_RERANKER","off")).lower()))
+        self.reranker_combo.setToolTip("Reorder retrieved chunks using a cross-encoder reranker.")
+        quick_layout.addWidget(QtWidgets.QLabel("Reranker:"))
+        quick_layout.addWidget(self.reranker_combo)
+        quick_layout.addSpacing(12)
+
+        self.pool_spin = QtWidgets.QSpinBox()
+        self.pool_spin.setRange(10, 5000)
+        self.pool_spin.setSingleStep(10)
+        self.pool_spin.setValue(int(prefs.get("ASK_CANDIDATES", os.environ.get("ASK_CANDIDATES","300"))))
+        self.pool_spin.setToolTip("Number of candidate chunks retrieved before reranking/filtering.")
+        quick_layout.addWidget(QtWidgets.QLabel("Pool:"))
+        quick_layout.addWidget(self.pool_spin)
+        quick_layout.addSpacing(12)
+
+        self.time_spin = QtWidgets.QSpinBox()
+        self.time_spin.setRange(10, 18000)
+        self.time_spin.setSingleStep(10)
+        self.time_spin.setValue(int(prefs.get("ASK_TIME_BUDGET_SEC", os.environ.get("ASK_TIME_BUDGET_SEC","120"))))
+        self.time_spin.setToolTip("Overall time budget for answering (seconds).")
+        quick_layout.addWidget(QtWidgets.QLabel("Time (s):"))
+        quick_layout.addWidget(self.time_spin)
+        quick_layout.addSpacing(12)
+
+        self.exh_cb = QtWidgets.QCheckBox("Exhaustive sweep")
+        self.exh_cb.setChecked(as_bool(prefs.get("ASK_EXHAUSTIVE", os.environ.get("ASK_EXHAUSTIVE","false"))))
+        self.exh_cb.setToolTip("Try additional batches until the time budget is consumed.")
+        quick_layout.addWidget(self.exh_cb)
+
+        self.mem_cb = QtWidgets.QCheckBox("Memory")
+        self.mem_cb.setChecked(self.memory_enabled)
+        self.mem_cb.setToolTip("Persist conversation history and use it as context")
+        quick_layout.addSpacing(12)
+        quick_layout.addWidget(self.mem_cb)
+        quick_layout.addStretch(1)
+
+        self.reranker_combo.currentTextChanged.connect(self._persist_quick_prefs)
+        self.pool_spin.valueChanged.connect(lambda _: self._persist_quick_prefs())
+        self.time_spin.valueChanged.connect(lambda _: self._persist_quick_prefs())
+        self.exh_cb.toggled.connect(lambda _: self._persist_quick_prefs())
+        self.mem_cb.toggled.connect(self._toggle_memory)
+
+        answer_toolbar = QtWidgets.QWidget()
+        answer_toolbar_lay = QtWidgets.QHBoxLayout(answer_toolbar)
+        answer_toolbar_lay.setContentsMargins(0, 0, 0, 0)
+        answer_toolbar_lay.setSpacing(4)
+        btn_copy = QtWidgets.QToolButton()
+        btn_copy.setIcon(load_icon('copy.png', self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon)))
+        btn_copy.setToolTip("Copy answer")
+        btn_copy.clicked.connect(self.copy_answer)
+        btn_save = QtWidgets.QToolButton()
+        btn_save.setIcon(load_icon('save.png', self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton)))
+        btn_save.setToolTip("Save answer")
+        btn_save.clicked.connect(self.save_answer)
+        btn_open = QtWidgets.QToolButton()
+        btn_open.setIcon(load_icon('open.png', self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton)))
+        btn_open.setToolTip("Open answer")
+        btn_open.clicked.connect(self.open_answer)
+        btn_clear = QtWidgets.QToolButton()
+        btn_clear.setIcon(load_icon('clear.png', self.style().standardIcon(QtWidgets.QStyle.SP_DialogResetButton)))
+        btn_clear.setToolTip("Clear answer")
+        btn_clear.clicked.connect(self.clear_answer)
+        self.state_chip = QtWidgets.QLabel("")
+        self.state_chip.setStyleSheet("QLabel { border-radius: 8px; background: palette(midlight); padding: 2px 8px; margin-left: 6px; font-size: 10pt; }")
+        answer_toolbar_lay.addWidget(btn_copy)
+        answer_toolbar_lay.addWidget(btn_save)
+        answer_toolbar_lay.addWidget(btn_open)
+        answer_toolbar_lay.addWidget(btn_clear)
+        answer_toolbar_lay.addStretch(1)
+        answer_toolbar_lay.addWidget(self.state_chip)
+
+        self.answer = QtWidgets.QTextBrowser()
+        self.answer.setOpenExternalLinks(True)
         self.answer.setReadOnly(True)
 
-        v2.addWidget(self.input_bar)
-        v2.addLayout(controls)
-        v2.addWidget(self.answer)
+        header = QtWidgets.QWidget()
+        header_v = QtWidgets.QVBoxLayout(header)
+        header_v.setContentsMargins(0, 0, 0, 0)
+        header_v.setSpacing(6)
+        header_v.addWidget(self.input_bar)
+        header_v.addLayout(controls)
+        header_v.addWidget(group_box)
 
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        splitter.setHandleWidth(1)
+        splitter.setStyleSheet("QSplitter::handle{background: transparent;}")
+        splitter.addWidget(header)
+        answer_wrap = QtWidgets.QWidget()
+        answer_wrap_lay = QtWidgets.QVBoxLayout(answer_wrap)
+        answer_wrap_lay.setContentsMargins(0,0,0,0)
+        answer_wrap_lay.setSpacing(2)
+        answer_toolbar_lay.setSpacing(4)
+        answer_wrap_lay.addWidget(answer_toolbar)
+        answer_wrap_lay.addWidget(self.answer)
+        splitter.addWidget(answer_wrap)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+        v2.addWidget(splitter)
+
+        ing_icon = load_icon('ingest.png', self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton))
+        ask_icon = load_icon('ask.png', self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxQuestion))
         self.tabs.addTab(ingest, "Ingest")
         self.tabs.addTab(ask, "Ask")
+        tab_idx = int(read_prefs().get("UI_TAB_INDEX", 1))
+        self.tabs.setCurrentIndex(tab_idx if 0 <= tab_idx < self.tabs.count() else 1)
+        self.tabs.currentChanged.connect(self._persist_tab_index)
 
         self.selected_paths = []
         self.ingest_worker = None
         self.ask_worker = None
 
-        cfg = load_config()
-        prefs = read_prefs()
-        self.memory_enabled = as_bool(prefs.get("MEMORY_ENABLED", os.environ.get("MEMORY_ENABLED", cfg.get("MEMORY_ENABLED") or "0")))
-        self.memory_token_limit = int(prefs.get("MEMORY_TOKEN_LIMIT", os.environ.get("MEMORY_TOKEN_LIMIT", cfg.get("MEMORY_TOKEN_LIMIT") or 1200)))
-        self.memory_file_limit_mb = int(prefs.get("MEMORY_FILE_LIMIT_MB", os.environ.get("MEMORY_FILE_LIMIT_MB", cfg.get("MEMORY_FILE_LIMIT_MB") or 50)))
-        self.history = mem.load_recent(self.memory_token_limit) if self.memory_enabled else []
-        self.history_limit = 1000
+        focus_act = QtGui.QAction("Focus Ask", self)
+        focus_act.setShortcut(QtGui.QKeySequence("Meta+L" if sys.platform == "darwin" else "Ctrl+L"))
+        focus_act.triggered.connect(lambda: self.q_edit.setFocus())
+        self.addAction(focus_act)
+
         self.adjust_input_height()
+        self.update_key_status()
+
+        esc_act = QtGui.QAction("Cancel", self)
+        esc_act.setShortcut(QtGui.QKeySequence("Escape"))
+        esc_act.triggered.connect(self.cancel_current)
+        self.addAction(esc_act)
+        ctrl_dot = "Meta+." if sys.platform == "darwin" else "Ctrl+."
+        ctrl_dot_act = QtGui.QAction("Cancel (Ctrl+.)", self)
+        ctrl_dot_act.setShortcut(QtGui.QKeySequence(ctrl_dot))
+        ctrl_dot_act.triggered.connect(self.cancel_current)
+        self.addAction(ctrl_dot_act)
+    def _apply_tab_style(self):
+        pal = self.palette()
+        win = pal.color(QtGui.QPalette.Window)
+        txt_win = pal.color(QtGui.QPalette.WindowText)
+        sel_bg = win.name()
+        sel_txt = txt_win.name()
+
+        lum = int(0.299 * win.red() + 0.587 * win.green() + 0.114 * win.blue())
+        dark_mode = lum < 140
+        unsel = QtGui.QColor(win)
+        hover = QtGui.QColor(win)
+        if dark_mode:
+            unsel = unsel.darker(135)
+            hover = hover.darker(120)
+            border = "rgba(255,255,255,0.14)"
+            unsel_txt = "#cfd3da"
+        else:
+            unsel = unsel.darker(110)
+            hover = hover.darker(105)
+            border = "rgba(0,0,0,0.15)"
+            unsel_txt = "#222222"
+
+        unsel_bg = unsel.name()
+        hover_bg = hover.name()
+
+        self.tabs.setStyleSheet(f"""
+        QTabWidget::pane {{
+            border: 0px;
+        }}
+        QTabBar {{
+            qproperty-drawBase: 0;
+        }}
+        QTabBar::tab {{
+            background: {unsel_bg};
+            color: {unsel_txt};
+            border: 1px solid {border};
+            border-bottom-color: transparent;
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+            padding: 7px 14px;
+            margin-right: 6px;
+            min-height: 28px;
+        }}
+        QTabBar::tab:hover {{
+            background: {hover_bg};
+        }}
+        QTabBar::tab:selected {{
+            background: {sel_bg};
+            color: {sel_txt};
+            font-weight: 600;
+            border-color: {border};
+        }}
+        """)
+
+    def changeEvent(self, e):
+        if e.type() == QtCore.QEvent.PaletteChange:
+            self._apply_tab_style()
+        super().changeEvent(e)
+
+    def _toggle_memory(self):
+        self.memory_enabled = self.mem_cb.isChecked()
+        prefs = read_prefs()
+        prefs["MEMORY_ENABLED"] = "true" if self.memory_enabled else "false"
+        write_prefs(prefs)
+        os.environ["MEMORY_ENABLED"] = prefs["MEMORY_ENABLED"]
+        if self.memory_enabled:
+            self.history = mem.load_recent(self.memory_token_limit)
+        else:
+            self.history = []
         self.update_key_status()
         
     def _build_input_bar(self):
@@ -526,10 +795,12 @@ class MainWindow(QtWidgets.QMainWindow):
         wrap.setObjectName("InputWrap")
         wrap.setFrameShape(QtWidgets.QFrame.StyledPanel)
         wrap.setLineWidth(1)
-        wrap.setStyleSheet("""
-    #InputWrap { border: 1px solid rgba(255,255,255,0.18); background: palette(base); }
-    QToolButton#AskInBar { border: 1px solid rgba(255,255,255,0.18); border-radius: 4px; padding: 0; min-width: 28px; min-height: 24px; }
-    """)
+        wrap.setStyleSheet(
+            """
+            #InputWrap { border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; background: palette(base); }
+            QToolButton#AskInBar { border: 1px solid rgba(255,255,255,0.18); border-radius: 6px; padding: 2px 6px; min-width: 28px; min-height: 24px; }
+            """
+        )
 
         lay = QtWidgets.QHBoxLayout(wrap)
         lay.setContentsMargins(8, 6, 6, 6)
@@ -606,13 +877,47 @@ class MainWindow(QtWidgets.QMainWindow):
             self.history = mem.load_recent(self.memory_token_limit) if self.memory_enabled else []
             self.update_key_status()
 
+    def _persist_quick_prefs(self):
+        prefs = read_prefs()
+        prefs["ASK_RERANKER"] = self.reranker_combo.currentText()
+        prefs["ASK_CANDIDATES"] = int(self.pool_spin.value())
+        prefs["ASK_TIME_BUDGET_SEC"] = int(self.time_spin.value())
+        prefs["ASK_EXHAUSTIVE"] = "true" if self.exh_cb.isChecked() else "false"
+        write_prefs(prefs)
+        os.environ["ASK_RERANKER"] = prefs["ASK_RERANKER"]
+        os.environ["ASK_CANDIDATES"] = str(prefs["ASK_CANDIDATES"])
+        os.environ["ASK_TIME_BUDGET_SEC"] = str(prefs["ASK_TIME_BUDGET_SEC"])
+        os.environ["ASK_EXHAUSTIVE"] = prefs["ASK_EXHAUSTIVE"]
+        self.update_key_status()
+
     def update_key_status(self):
         status = present_keys()
+        prefs = read_prefs()
+        rer = (prefs.get("ASK_RERANKER") or os.environ.get("ASK_RERANKER", "off")).lower()
+        cand = prefs.get("ASK_CANDIDATES") or os.environ.get("ASK_CANDIDATES", "300")
         bits = []
         bits.append(f"OPENAI: {'✓' if status.get('OPENAI_API_KEY') else '×'}")
         bits.append(f"HF: {'✓' if status.get('HF_TOKEN') else '×'}")
         bits.append(f"Memory: {'on' if self.memory_enabled else 'off'}")
+        bits.append(f"Reranker: {rer}")
+        bits.append(f"Pool: {cand}")
+        bits.append(f"Time(s): {prefs.get('ASK_TIME_BUDGET_SEC') or os.environ.get('ASK_TIME_BUDGET_SEC','120')}")
+        bits.append(f"Exh: {prefs.get('ASK_EXHAUSTIVE') or os.environ.get('ASK_EXHAUSTIVE','false')}")
         self.status.showMessage(" | ".join(bits))
+
+    def cancel_current(self):
+        if self.ingest_worker and self.ingest_worker.isRunning():
+            self.status.showMessage("Cancelling ingest…")
+            self.state_chip.setText("Cancelling…")
+            self.ingest_worker.requestInterruption()
+            return
+        if self.ask_worker and self.ask_worker.isRunning():
+            self.status.showMessage("Cancelling ask…")
+            self.state_chip.setText("Cancelling…")
+            self.ask_worker.requestInterruption()
+            return
+        self.status.showMessage("Nothing to cancel")
+        self.state_chip.setText("Idle")
 
     def choose_files(self):
         fns, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Choose files", "", "PDF and Images (*.pdf *.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp)")
@@ -630,6 +935,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ingest_log.clear()
         self.status_prog.show()
         self.status_prog.setValue(0)
+        self.cancel_btn.show()
         self.ingest_worker = IngestWorker(self.selected_paths)
         self.ingest_worker.progress.connect(self.ingest_log.appendPlainText)
         self.ingest_worker.progress_pct.connect(self.status_prog.setValue)
@@ -669,6 +975,7 @@ class MainWindow(QtWidgets.QMainWindow):
         md = "### Auto-summary\n\n" + info.get("doc_summary","")
         render_markdown(self.answer, md)
         self.tabs.setCurrentIndex(1)
+        self.cancel_btn.hide()
 
     def ingest_fail(self, msg):
         self.progress.hide()
@@ -676,28 +983,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pick_btn.setEnabled(True)
         self.ingest_log.appendPlainText("\n[ERROR]\n" + msg)
         self.status_prog.hide()
-        QtWidgets.QMessageBox.critical(self, "Ingest failed", msg)
+        if str(msg).strip().startswith("Cancelled"):
+            self.status.showMessage("Operation cancelled")
+        else:
+            QtWidgets.QMessageBox.critical(self, "Ingest failed", msg)
+        self.cancel_btn.hide()
 
     def run_ask(self):
         q = self.q_edit.toPlainText().strip()
         if not q:
             QtWidgets.QMessageBox.information(self, "Ask", "Type a question first.")
             return
-        render_markdown(self.answer, "_Working…_")
+        self.q_edit.clear()
+        render_markdown(self.answer, f"### Q: {q}\n\n_Working…_")
+        self.state_chip.setText("Working…")
         self.ask_btn_inbar.setEnabled(False)
         self.status_prog.show()
         self.status_prog.setValue(0)
+        self.cancel_btn.show()
         prefs = read_prefs()
         prefs["ASK_STRICT_DOC"] = "true" if self.strict_cb.isChecked() else "false"
         prefs["ASK_FORMULA_FORCE"] = "true" if self.formula_cb.isChecked() else "false"
         write_prefs(prefs)
         os.environ["ASK_STRICT_DOC"] = "1" if self.strict_cb.isChecked() else "0"
         os.environ["ASK_FORMULA_FORCE"] = "1" if self.formula_cb.isChecked() else "0"
+        self._persist_quick_prefs()
         self.ask_worker = AskWorker(q, self.k_spin.value(), history=self.history, formula_mode=self.formula_cb.isChecked())
         self.ask_worker.progress.connect(lambda s: self.status.showMessage(s))
         self.ask_worker.progress_pct.connect(self.status_prog.setValue)
         self.ask_worker.finished.connect(self.ask_done)
         self.ask_worker.failed.connect(self.ask_fail)
+        self.ask_worker._last_q = q
         self.ask_worker.start()
 
     def ask_done(self, out):
@@ -708,24 +1024,90 @@ class MainWindow(QtWidgets.QMainWindow):
         qmd = ""
         if quotes:
             qmd = "\n\n### Evidence snippets\n" + "\n".join([f"> {q['quote']}\n>\n> — {q['source']}" for q in quotes])
-        render_markdown(self.answer, text + "\n\n**Citations:** " + cites + qmd)
-        q = self.q_edit.toPlainText().strip()
+        q = getattr(self.ask_worker, "_last_q", "") if hasattr(self, "ask_worker") else ""
+        prefix = f"### Q: {q}\n\n" if q else ""
+        render_markdown(self.answer, prefix + text + "\n\n**Citations:** " + cites + qmd)
         if self.memory_enabled and q and text:
             mem.append_turn(q, text)
             mem.prune_file(self.memory_file_limit_mb)
             self.history = mem.load_recent(self.memory_token_limit)
         self.status.showMessage("Answer ready")
+        self.state_chip.setText("Ready")
         self.status_prog.hide()
+        self.cancel_btn.hide()
 
     def ask_fail(self, msg):
         self.ask_btn_inbar.setEnabled(True)
         render_markdown(self.answer, "**ERROR**\n\n```\n" + msg + "\n```")
-        QtWidgets.QMessageBox.critical(self, "Ask failed", msg)
+        self.state_chip.setText("Error")
+        if str(msg).strip().startswith("Cancelled"):
+            self.status.showMessage("Operation cancelled")
+        else:
+            QtWidgets.QMessageBox.critical(self, "Ask failed", msg)
         self.status_prog.hide()
+        self.cancel_btn.hide()
+
+    def show_shortcuts(self):
+        shortcuts = [
+            ("Ask", "Enter"),
+            ("Ask (from Ask box)", "Ctrl+Enter / Shift+Enter"),
+            ("Focus Ask", "Cmd+L" if sys.platform == "darwin" else "Ctrl+L"),
+            ("Toggle Quick Settings", "Cmd+Shift+Q" if sys.platform == "darwin" else "Ctrl+Shift+Q"),
+            ("Cancel", "Esc, Cmd+. or Ctrl+."),
+            ("Copy Answer", "—"),
+            ("Save Answer", "—"),
+            ("Open Answer", "—"),
+            ("Clear Answer", "—"),
+            ("Keyboard Shortcuts", "Cmd+/" if sys.platform == "darwin" else "Ctrl+/"),
+        ]
+        msg = "\n".join([f"{name}: {key}" for name, key in shortcuts])
+        QtWidgets.QMessageBox.information(self, "Keyboard Shortcuts", msg)
+
+    def copy_answer(self):
+        text = self.answer.toPlainText()
+        QtWidgets.QApplication.clipboard().setText(text)
+        self.status.showMessage("Answer copied")
+
+    def save_answer(self):
+        fn, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Answer", "", "Text Files (*.txt);;Markdown (*.md);;All Files (*)")
+        if not fn:
+            return
+        try:
+            with open(fn, "w", encoding="utf-8") as f:
+                f.write(self.answer.toPlainText())
+            self.status.showMessage(f"Answer saved to {fn}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Save Answer", str(e))
+
+    def open_answer(self):
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Answer", "", "Text Files (*.txt);;Markdown (*.md);;All Files (*)")
+        if not fn:
+            return
+        try:
+            with open(fn, "r", encoding="utf-8") as f:
+                text = f.read()
+            render_markdown(self.answer, text)
+            self.status.showMessage(f"Loaded answer from {fn}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Open Answer", str(e))
+
+    def clear_answer(self):
+        self.answer.clear()
+        self.status.showMessage("Answer cleared")
+        self.state_chip.setText("Idle")
+
+    def _persist_tab_index(self, idx):
+        prefs = read_prefs()
+        prefs["UI_TAB_INDEX"] = idx
+        write_prefs(prefs)
 
 def main():
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
+    app_icon = load_icon('icon') or load_icon('icon.png')
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
     w = MainWindow()
     w.show()
     sys.exit(app.exec())
