@@ -4,6 +4,14 @@ import faiss
 from api.services.embed import embed_texts, embedding_info
 from api.core.config import load_config
 from api.services import formula_cls
+from api.services import agent
+
+def _agent_enabled():
+    try:
+        fn = getattr(agent, "is_agent_mode", None)
+        return bool(fn()) if callable(fn) else False
+    except Exception:
+        return False
 
 ART = pathlib.Path("artifacts"); ART.mkdir(parents=True, exist_ok=True)
 
@@ -252,8 +260,7 @@ def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None):
     if progress_cb:
         progress_cb(f"Search: FAISS top-{pool}")
     D, I = idx.search(qv, pool)
-    rows_all = _all_chunks()
-    cand_rows, cand_ids, emb_scores = [], [], []
+    rows_all, cand_rows, cand_ids, emb_scores = _all_chunks(), [], [], []
     for j, s in zip(I[0], D[0]):
         if j < 0 or j >= len(rows_all):
             continue
@@ -331,19 +338,27 @@ def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None):
         progress_cb(f"Search: candidates {len(cand_rows)}")
     if t_end and time.time() >= t_end:
         order = np.argsort(-hybrid)[:k]
-        return [(float(hybrid[i]), cand_rows[i]) for i in order]
+        out = [(float(hybrid[i]), cand_rows[i]) for i in order]
+        if _agent_enabled():
+            out = agent.verify_answer(text, out)
+        return out
     if progress_cb:
         progress_cb("Search: reconstructing candidate vectors")
     dvs = _reconstruct_batch(idx, cand_ids, progress_cb=progress_cb, t_end=t_end)
     if dvs is None or (t_end and time.time() >= t_end):
         order = np.argsort(-hybrid)[:k]
-        return [(float(hybrid[i]), cand_rows[i]) for i in order]
+        out = [(float(hybrid[i]), cand_rows[i]) for i in order]
+        if _agent_enabled():
+            out = agent.verify_answer(text, out)
+        return out
     if progress_cb:
         progress_cb("Search: MMR selection")
     order_local = _mmr_select_vectors(qv[0], dvs, hybrid, k=k, lambda_weight=0.75)
     out = []
     for i in order_local:
         out.append((float(hybrid[i]), cand_rows[i]))
+    if _agent_enabled():
+        out = agent.verify_answer(text, out)
     return out
 
 def list_chunks():
