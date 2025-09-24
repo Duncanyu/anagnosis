@@ -34,6 +34,7 @@ from api.services.parse import parse_any_bytes
 from api.services.chunk import chunk_pages
 from api.services.index import add_chunks, search, clear_index
 from api.services.summarize import summarize, summarize_document, summarizer_info, summarize_batched, summarize_all_formulas, is_formula_query
+from api.services import agent
 from api.services.embed import embedding_info
 from api.services import memory as mem
 from api.services import aliases
@@ -215,12 +216,13 @@ class AskWorker(QtCore.QThread):
     finished = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
 
-    def __init__(self, question, k, history, formula_mode=False):
+    def __init__(self, question, k, history, formula_mode=False, agents_enabled=False):
         super().__init__()
         self.question = question
         self.k = k
         self.history = history
         self.formula_mode = formula_mode
+        self.agents_enabled = agents_enabled
     
     def _check_cancel(self):
         if self.isInterruptionRequested():
@@ -275,6 +277,14 @@ class AskWorker(QtCore.QThread):
                         pct = max(20, min(95, pct))
                         self.progress_pct.emit(pct)
                 out = summarize_all_formulas(self.question, top_chunks, progress_cb=p_cb)
+                if self.agents_enabled:
+                    self._check_cancel()
+                    try:
+                        agent_budget = int(os.environ.get("AGENT_VERIFY_BUDGET", "30"))
+                        out = agent.verify_answer(self.question, out, hits, time_budget_sec=agent_budget)
+                    except Exception:
+                        self.progress.emit("Agent verification skipped (error).")
+                    self._check_cancel()
             else:
                 self._check_cancel()
                 self.progress.emit("Summarizing with context…")
@@ -291,6 +301,20 @@ class AskWorker(QtCore.QThread):
                     chs.append(x)
                 self._check_cancel()
                 out = summarize_batched(self.question, chs, history=self.history, progress_cb=lambda s: self.progress.emit(s), max_batches=mb, time_budget_sec=tb, exhaustive=exh)
+                if self.agents_enabled:
+                    self._check_cancel()
+                    try:
+                        agent_budget = int(os.environ.get("AGENT_VERIFY_BUDGET", "30"))
+                        out = agent.verify_answer(self.question, out, hits, time_budget_sec=agent_budget)
+                    except Exception:
+                        self.progress.emit("Agent verification skipped (error).")
+                    self._check_cancel()
+
+            try:
+                if isinstance(out, dict) and "citations" in out:
+                    out["citations"] = sorted(set(out.get("citations", [])))
+            except Exception:
+                pass
 
             self.progress_pct.emit(100)
             self.finished.emit(out)
@@ -650,6 +674,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mem_cb.setToolTip("Persist conversation history and use it as context")
         quick_layout.addSpacing(12)
         quick_layout.addWidget(self.mem_cb)
+
+        self.agents_cb = QtWidgets.QCheckBox("Agents")
+        self.agents_cb.setChecked(as_bool(prefs.get("ASK_AGENTS", os.environ.get("ASK_AGENTS", "false"))))
+        self.agents_cb.setToolTip("Enable agentic verification and reasoning (slower)")
+        quick_layout.addSpacing(12)
+        quick_layout.addWidget(self.agents_cb)
+
         quick_layout.addStretch(1)
 
         self.reranker_combo.currentTextChanged.connect(self._persist_quick_prefs)
@@ -909,11 +940,13 @@ class MainWindow(QtWidgets.QMainWindow):
         prefs["ASK_CANDIDATES"] = int(self.pool_spin.value())
         prefs["ASK_TIME_BUDGET_SEC"] = int(self.time_spin.value())
         prefs["ASK_EXHAUSTIVE"] = "true" if self.exh_cb.isChecked() else "false"
+        prefs["ASK_AGENTS"] = "true" if self.agents_cb.isChecked() else "false"
         write_prefs(prefs)
         os.environ["ASK_RERANKER"] = prefs["ASK_RERANKER"]
         os.environ["ASK_CANDIDATES"] = str(prefs["ASK_CANDIDATES"])
         os.environ["ASK_TIME_BUDGET_SEC"] = str(prefs["ASK_TIME_BUDGET_SEC"])
         os.environ["ASK_EXHAUSTIVE"] = prefs["ASK_EXHAUSTIVE"]
+        os.environ["ASK_AGENTS"] = prefs["ASK_AGENTS"]
         self.update_key_status()
 
     def update_key_status(self):
@@ -929,6 +962,7 @@ class MainWindow(QtWidgets.QMainWindow):
         bits.append(f"Pool: {cand}")
         bits.append(f"Time(s): {prefs.get('ASK_TIME_BUDGET_SEC') or os.environ.get('ASK_TIME_BUDGET_SEC','120')}")
         bits.append(f"Exh: {prefs.get('ASK_EXHAUSTIVE') or os.environ.get('ASK_EXHAUSTIVE','false')}")
+        bits.append(f"Agents: {'on' if as_bool(prefs.get('ASK_AGENTS', os.environ.get('ASK_AGENTS','false'))) else 'off'}")
         self.status.showMessage(" | ".join(bits))
 
     def cancel_current(self):
@@ -1030,11 +1064,17 @@ class MainWindow(QtWidgets.QMainWindow):
         prefs = read_prefs()
         prefs["ASK_STRICT_DOC"] = "true" if self.strict_cb.isChecked() else "false"
         prefs["ASK_FORMULA_FORCE"] = "true" if self.formula_cb.isChecked() else "false"
+        prefs["ASK_AGENTS"] = "true" if self.agents_cb.isChecked() else "false"
         write_prefs(prefs)
         os.environ["ASK_STRICT_DOC"] = "1" if self.strict_cb.isChecked() else "0"
         os.environ["ASK_FORMULA_FORCE"] = "1" if self.formula_cb.isChecked() else "0"
+        os.environ["ASK_AGENTS"] = "true" if self.agents_cb.isChecked() else "false"
         self._persist_quick_prefs()
-        self.ask_worker = AskWorker(q, self.k_spin.value(), history=self.history, formula_mode=self.formula_cb.isChecked())
+        self.ask_worker = AskWorker(
+            q, self.k_spin.value(), history=self.history,
+            formula_mode=self.formula_cb.isChecked(),
+            agents_enabled=self.agents_cb.isChecked()
+        )
         self.ask_worker.progress.connect(lambda s: self.status.showMessage(s))
         self.ask_worker.progress_pct.connect(self.status_prog.setValue)
         self.ask_worker.finished.connect(self.ask_done)
