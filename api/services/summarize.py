@@ -1169,6 +1169,9 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
         time_budget_sec = TIME_BUDGET_SEC_DEFAULT
     if exhaustive is None:
         exhaustive = ASK_EXHAUSTIVE_DEFAULT
+    sweep = bool(exhaustive)
+    if not sweep:
+        max_batches = 1
     prim = sorted(base, key=_score_chunk_for_order)
     try:
         mmr_idx = _mmr_order(question, prim)
@@ -1200,10 +1203,12 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
         parts = []
         seen_sources = []
         total = min(len(batches), max_batches)
-        t_end = time.time() + time_budget_sec
+        if not sweep:
+            total = min(total, 1)
+        t_end = time.time() + time_budget_sec if sweep else None
         plateau = 0
         for i, batch in enumerate(batches[:total], 1):
-            if time.time() >= t_end:
+            if t_end and time.time() >= t_end:
                 break
             ctx = _format_ctx(batch)
             prompt = TEMPLATE.format(q=question, ctx=ctx, terms=", ".join(_keywords(question)))
@@ -1211,10 +1216,11 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
             pre_tokens = _estimate_tokens("\n".join(m["content"] for m in messages)) + 600
             if used_tok + pre_tokens > tok_cap or used_req + 1 > req_cap:
                 break
-            if progress_cb:
+            tok_label = ("∞" if tok_cap == math.inf else str(tok_cap))
+            if progress_cb and sweep:
                 try:
-                    left = int(max(0, t_end - time.time()))
-                    progress_cb(f"Batch {i}/{total} • {used_tok}/{tok_cap if tok_cap!=math.inf else 0} tok • {left}s left")
+                    left = int(max(0, (t_end - time.time()) if t_end else 0))
+                    progress_cb(f"Batch {i}/{total} • {used_tok}/{tok_label} tok • {left}s left")
                 except Exception:
                     pass
             ans, spent = _openai_chat(messages, max_new_tokens=600)
@@ -1225,7 +1231,9 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
             for c in batch:
                 seen_sources.append(_fmt_source(c))
             delta = len(set(seen_sources) - prev)
-            if not exhaustive and i >= 2 and delta == 0:
+            if not sweep:
+                break
+            elif i >= 2 and delta == 0:
                 break
         if not parts:
             return summarize(question, ordered[:max(1, min(6, len(ordered)))], history=history)
@@ -1236,13 +1244,15 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
         parts = []
         seen_sources = []
         total = min(len(batches), max_batches)
-        t_end = time.time() + time_budget_sec
+        if not sweep:
+            total = min(total, 1)
+        t_end = time.time() + time_budget_sec if sweep else None
         for i, batch in enumerate(batches[:total], 1):
-            if time.time() >= t_end:
+            if t_end and time.time() >= t_end:
                 break
-            if progress_cb:
+            if progress_cb and sweep:
                 try:
-                    left = int(max(0, t_end - time.time()))
+                    left = int(max(0, (t_end - time.time()) if t_end else 0))
                     progress_cb(f"Batch {i}/{total} • {left}s left")
                 except Exception:
                     pass
@@ -1262,7 +1272,9 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
             for c in batch:
                 seen_sources.append(_fmt_source(c))
             delta = len(set(seen_sources) - prev)
-            if not exhaustive and i >= 2 and delta == 0:
+            if not sweep:
+                break
+            elif i >= 2 and delta == 0:
                 break
         if not parts:
             return summarize(question, ordered[:max(1, min(6, len(ordered)))], history=history)
