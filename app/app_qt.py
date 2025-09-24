@@ -280,8 +280,21 @@ class AskWorker(QtCore.QThread):
                 if self.agents_enabled:
                     self._check_cancel()
                     try:
+                        self.progress.emit("Agents: verifying…")
                         agent_budget = int(os.environ.get("AGENT_VERIFY_BUDGET", "30"))
-                        out = agent.verify_answer(self.question, out, hits, time_budget_sec=agent_budget)
+                        _prev = out if isinstance(out, dict) else {"answer": str(out)}
+                        _res = agent.verify_answer(self.question, out, hits, time_budget_sec=agent_budget)
+                        changed = False
+                        try:
+                            changed = (_res.get("answer", "") != _prev.get("answer", ""))
+                        except Exception:
+                            changed = False
+                        if isinstance(_res, dict):
+                            meta = _res.get("agent_meta", {})
+                            meta.update({"enabled": True, "changed": bool(changed)})
+                            _res["agent_meta"] = meta
+                        out = _res
+                        self.progress.emit("Agents: verdict — " + ("modified" if changed else "validated"))
                     except Exception:
                         self.progress.emit("Agent verification skipped (error).")
                     self._check_cancel()
@@ -304,8 +317,21 @@ class AskWorker(QtCore.QThread):
                 if self.agents_enabled:
                     self._check_cancel()
                     try:
+                        self.progress.emit("Agents: verifying…")
                         agent_budget = int(os.environ.get("AGENT_VERIFY_BUDGET", "30"))
-                        out = agent.verify_answer(self.question, out, hits, time_budget_sec=agent_budget)
+                        _prev = out if isinstance(out, dict) else {"answer": str(out)}
+                        _res = agent.verify_answer(self.question, out, hits, time_budget_sec=agent_budget)
+                        changed = False
+                        try:
+                            changed = (_res.get("answer", "") != _prev.get("answer", ""))
+                        except Exception:
+                            changed = False
+                        if isinstance(_res, dict):
+                            meta = _res.get("agent_meta", {})
+                            meta.update({"enabled": True, "changed": bool(changed)})
+                            _res["agent_meta"] = meta
+                        out = _res
+                        self.progress.emit("Agents: verdict — " + ("modified" if changed else "validated"))
                     except Exception:
                         self.progress.emit("Agent verification skipped (error).")
                     self._check_cancel()
@@ -623,15 +649,17 @@ class MainWindow(QtWidgets.QMainWindow):
         controls.addWidget(self.formula_cb)
         controls.addStretch(1)
 
-        group_box = QtWidgets.QGroupBox("Quick settings")
-        group_box.setFlat(True)
-        group_box.setStyleSheet(
+        self.quick_box = QtWidgets.QGroupBox("Quick settings")
+        self.quick_box.setFlat(True)
+        self.quick_box.setStyleSheet(
             """
             QGroupBox { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; margin-top: 18px; }
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 2px 6px; background: transparent; }
             """
         )
-        quick_layout = QtWidgets.QHBoxLayout(group_box)
+        qv = as_bool(read_prefs().get("UI_QUICK_VISIBLE", "true"))
+        self.quick_box.setVisible(qv)
+        quick_layout = QtWidgets.QHBoxLayout(self.quick_box)
         quick_layout.setContentsMargins(8, 8, 8, 8)
 
         quick_layout.addWidget(QtWidgets.QLabel("Top-k:"))
@@ -681,6 +709,7 @@ class MainWindow(QtWidgets.QMainWindow):
         quick_layout.addSpacing(12)
         quick_layout.addWidget(self.agents_cb)
 
+
         quick_layout.addStretch(1)
 
         self.reranker_combo.currentTextChanged.connect(self._persist_quick_prefs)
@@ -688,6 +717,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.time_spin.valueChanged.connect(lambda _: self._persist_quick_prefs())
         self.exh_cb.toggled.connect(lambda _: self._persist_quick_prefs())
         self.mem_cb.toggled.connect(self._toggle_memory)
+        self.agents_cb.toggled.connect(lambda _: self._persist_quick_prefs())
 
         answer_toolbar = QtWidgets.QWidget()
         answer_toolbar_lay = QtWidgets.QHBoxLayout(answer_toolbar)
@@ -728,7 +758,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header_v.setSpacing(6)
         header_v.addWidget(self.input_bar)
         header_v.addLayout(controls)
-        header_v.addWidget(group_box)
+        header_v.addWidget(self.quick_box)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         splitter.setHandleWidth(1)
@@ -759,6 +789,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ingest_worker = None
         self.ask_worker = None
 
+        act_qs = QtGui.QAction("Quick Settings", self)
+        act_qs.setCheckable(True)
+        act_qs.setChecked(qv)
+        qs_shortcut = QtGui.QKeySequence("Meta+Shift+Q" if sys.platform == "darwin" else "Ctrl+Shift+Q")
+        act_qs.setShortcut(qs_shortcut)
+        act_qs.triggered.connect(self.toggle_quick_settings)
+        tb.addAction(act_qs)
+        self._act_quick_settings = act_qs
+
         focus_act = QtGui.QAction("Focus Ask", self)
         focus_act.setShortcut(QtGui.QKeySequence("Meta+L" if sys.platform == "darwin" else "Ctrl+L"))
         focus_act.triggered.connect(lambda: self.q_edit.setFocus())
@@ -776,6 +815,15 @@ class MainWindow(QtWidgets.QMainWindow):
         ctrl_dot_act.setShortcut(QtGui.QKeySequence(ctrl_dot))
         ctrl_dot_act.triggered.connect(self.cancel_current)
         self.addAction(ctrl_dot_act)
+
+    def toggle_quick_settings(self):
+        vis = not self.quick_box.isVisible()
+        self.quick_box.setVisible(vis)
+        if hasattr(self, "_act_quick_settings"):
+            self._act_quick_settings.setChecked(vis)
+        prefs = read_prefs()
+        prefs["UI_QUICK_VISIBLE"] = "true" if vis else "false"
+        write_prefs(prefs)
     def _apply_tab_style(self):
         pal = self.palette()
         win = pal.color(QtGui.QPalette.Window)
@@ -817,6 +865,7 @@ class MainWindow(QtWidgets.QMainWindow):
             border-top-right-radius: 8px;
             padding: 7px 14px;
             margin-right: 6px;
+            margin-top: 6px;
             min-height: 28px;
         }}
         QTabBar::tab:hover {{
@@ -825,8 +874,9 @@ class MainWindow(QtWidgets.QMainWindow):
         QTabBar::tab:selected {{
             background: {sel_bg};
             color: {sel_txt};
-            font-weight: 600;
+            font-weight: 700;
             border-color: {border};
+            margin-top: 0px;
         }}
         """)
 
@@ -962,7 +1012,8 @@ class MainWindow(QtWidgets.QMainWindow):
         bits.append(f"Pool: {cand}")
         bits.append(f"Time(s): {prefs.get('ASK_TIME_BUDGET_SEC') or os.environ.get('ASK_TIME_BUDGET_SEC','120')}")
         bits.append(f"Exh: {prefs.get('ASK_EXHAUSTIVE') or os.environ.get('ASK_EXHAUSTIVE','false')}")
-        bits.append(f"Agents: {'on' if as_bool(prefs.get('ASK_AGENTS', os.environ.get('ASK_AGENTS','false'))) else 'off'}")
+        agents_on = as_bool(prefs.get('ASK_AGENTS', os.environ.get('ASK_AGENTS','false')))
+        bits.append(f"Agents: {'on' if agents_on else 'off'}")
         self.status.showMessage(" | ".join(bits))
 
     def cancel_current(self):
@@ -1092,7 +1143,18 @@ class MainWindow(QtWidgets.QMainWindow):
             qmd = "\n\n### Evidence snippets\n" + "\n".join([f"> {q['quote']}\n>\n> — {q['source']}" for q in quotes])
         q = getattr(self.ask_worker, "_last_q", "") if hasattr(self, "ask_worker") else ""
         prefix = f"### Q: {q}\n\n" if q else ""
-        render_markdown(self.answer, prefix + text + "\n\n**Citations:** " + cites + qmd)
+        agent_diag = ""
+        if isinstance(out, dict):
+            meta = out.get("agent_meta")
+            rep = out.get("agent_report")
+            if meta or self.agents_cb.isChecked():
+                if meta and meta.get("enabled"):
+                    agent_diag = "\n\n_Agents: " + ("modified._" if meta.get("changed") else "validated._")
+                else:
+                    agent_diag = "\n\n_Agents: ran._"
+                if isinstance(rep, str) and rep.strip():
+                    agent_diag += "\n\n<details><summary>Agent report</summary>\n\n" + rep + "\n\n</details>"
+        render_markdown(self.answer, prefix + text + "\n\n**Citations:** " + cites + qmd + agent_diag)
         if self.memory_enabled and q and text:
             mem.append_turn(q, text)
             mem.prune_file(self.memory_file_limit_mb)
@@ -1114,11 +1176,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cancel_btn.hide()
 
     def show_shortcuts(self):
+        qs_key = "Cmd+Shift+Q" if sys.platform == "darwin" else "Ctrl+Shift+Q"
         shortcuts = [
             ("Ask", "Enter"),
             ("Ask (from Ask box)", "Ctrl+Enter / Shift+Enter"),
             ("Focus Ask", "Cmd+L" if sys.platform == "darwin" else "Ctrl+L"),
-            ("Toggle Quick Settings", "Cmd+Shift+Q" if sys.platform == "darwin" else "Ctrl+Shift+Q"),
+            ("Toggle Quick Settings", qs_key),
             ("Cancel", "Esc, Cmd+. or Ctrl+."),
             ("Copy Answer", "—"),
             ("Save Answer", "—"),

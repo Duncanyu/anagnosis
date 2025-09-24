@@ -633,6 +633,7 @@ def summarize_all_formulas(question, chunks, progress_cb=None, exhaustive=None, 
         tb = None
     else:
         tb = time_budget_sec if time_budget_sec else int(os.environ.get("ASK_TIME_BUDGET_SEC","120"))
+    _maybe_init_sft(progress_cb)
 
     base = list(chunks)
     if exhaustive:
@@ -701,7 +702,6 @@ def summarize_all_formulas(question, chunks, progress_cb=None, exhaustive=None, 
         answer += "\n\n_Diagnostics: SFT filtering active; {}. Min prob = {:.2f}_".format(cov, FORMULA_P_MIN)
     if ASK_CITATION_NOTE:
         answer += "\n\n*Grounded in the cited pages below.*"
-    return {"answer": answer, "citations": cites, "quotes": []}
     return {"answer": answer, "citations": cites, "quotes": []}
 
 def _normalize_md(s):
