@@ -65,7 +65,33 @@ def write_prefs(d):
 def render_markdown(widget, md_text):
     if mdlib:
         html = mdlib.markdown(md_text, extensions=["fenced_code", "tables", "toc"])
-        css = "<style>body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.45;padding:8px}h1,h2,h3{margin-top:1em}code{background:#f6f8fa;padding:2px 4px;border-radius:4px}pre{background:#f6f8fa;padding:8px;border-radius:8px;overflow:auto}ul{margin-left:1.2em}blockquote{border-left:3px solid #ddd;padding-left:8px;color:#555}table{border-collapse:collapse}th,td{border:1px solid #ddd;padding:4px 8px}</style>"
+        pal = widget.palette()
+        win = pal.color(QtGui.QPalette.Window)
+        txt = pal.color(QtGui.QPalette.WindowText)
+        lum = int(0.299 * win.red() + 0.587 * win.green() + 0.114 * win.blue())
+        dark = lum < 140
+        if dark:
+            text_color = "#dde2ea"
+            border = "rgba(255,255,255,0.13)"
+            link = "#6ab3fa"
+        else:
+            text_color = "#23272d"
+            border = "#ddd"
+            link = "#0366d6"
+        css = (
+            "<style>"
+            f"body{{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.45;padding:8px;color:{text_color};background:transparent;}}"
+            "h1,h2,h3{margin-top:1em}"
+            "code{background:transparent;padding:2px 4px;border-radius:4px}"
+            "pre{background:transparent;padding:8px;border-radius:8px;overflow:auto}"
+            "ul{margin-left:1.2em}"
+            f"blockquote{{border-left:3px solid {border};padding-left:8px;color:{'#8ca0b3' if dark else '#555'}}}"
+            "table{border-collapse:collapse}"
+            f"th,td{{border:1px solid {border};padding:4px 8px}}"
+            f"a{{color:{link};text-decoration:none}}"
+            f"a:hover{{text-decoration:underline}}"
+            "</style>"
+        )
         widget.setHtml(f"<html><head><meta charset='utf-8'>{css}</head><body>{html}</body></html>")
     else:
         try:
