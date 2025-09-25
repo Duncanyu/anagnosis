@@ -462,6 +462,9 @@ class SettingsDialog(QtWidgets.QDialog):
         mem_form.addRow("Memory enabled", self.mem_enable)
         mem_form.addRow("Memory token limit", self.mem_tokens)
         mem_form.addRow("Memory file limit (MB)", self.mem_mb)
+        btn_clear_mem = QtWidgets.QPushButton("Clear memory now…")
+        btn_clear_mem.clicked.connect(self._clear_memory_now)
+        mem_form.addRow("Actions", btn_clear_mem)
         tabs.addTab(mem_w, "Memory")
 
         limits_w = QtWidgets.QWidget()
@@ -470,6 +473,12 @@ class SettingsDialog(QtWidgets.QDialog):
         limits_form.addRow("OPENAI_RPM", self.openai_rpm)
         limits_form.addRow("Ask batch char budget", self.ask_batch_chars)
         limits_form.addRow("Ask max batches", self.ask_max_batches)
+        btn_clear_cache = QtWidgets.QPushButton("Clear Python cache (__pycache__)")
+        btn_clear_cache.clicked.connect(self._clear_py_cache)
+        btn_clear_index = QtWidgets.QPushButton("Clear search index (all chunks)")
+        btn_clear_index.clicked.connect(self._clear_index_now)
+        limits_form.addRow("Maintenance", btn_clear_cache)
+        limits_form.addRow("", btn_clear_index)
         tabs.addTab(limits_w, "Budgets")
 
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
@@ -479,6 +488,60 @@ class SettingsDialog(QtWidgets.QDialog):
         lay = QtWidgets.QVBoxLayout(self)
         lay.addWidget(tabs)
         lay.addWidget(buttons)
+
+    def _clear_memory_now(self):
+        if QtWidgets.QMessageBox.question(self, "Clear memory", "Erase saved Q/A memory on disk and reset in-app history?") != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            cleared = False
+            try:
+                if hasattr(mem, "clear"):
+                    mem.clear()
+                    cleared = True
+            except Exception:
+                cleared = False
+            p = self.parent()
+            if p is not None and hasattr(p, "history"):
+                p.history = []
+                if hasattr(p, "update_key_status"):
+                    p.update_key_status()
+            msg = "Memory cleared." if cleared else "Couldn't clear memory (no 'mem.clear()')."
+            QtWidgets.QMessageBox.information(self, "Clear memory", msg)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Clear memory", str(e))
+
+    def _clear_py_cache(self):
+        if QtWidgets.QMessageBox.question(self, "Clear cache", "Delete all __pycache__ folders and .pyc files under the project?") != QtWidgets.QMessageBox.Yes:
+            return
+        n_dirs = 0
+        n_files = 0
+        try:
+            for root, dirs, files in os.walk(str(ROOT)):
+                for d in list(dirs):
+                    if d == "__pycache__":
+                        p = os.path.join(root, d)
+                        shutil.rmtree(p, ignore_errors=True)
+                        n_dirs += 1
+                for f in files:
+                    if f.endswith(".pyc") or f.endswith(".pyo"):
+                        p = os.path.join(root, f)
+                        try:
+                            os.remove(p)
+                            n_files += 1
+                        except Exception:
+                            pass
+            QtWidgets.QMessageBox.information(self, "Clear cache", f"Removed {n_dirs} __pycache__ dirs and {n_files} bytecode files.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Clear cache", str(e))
+
+    def _clear_index_now(self):
+        if QtWidgets.QMessageBox.question(self, "Clear index", "Delete all indexed chunks? This cannot be undone.") != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            clear_index()
+            QtWidgets.QMessageBox.information(self, "Clear index", "Index cleared.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Clear index", str(e))
     def save(self):
         if self.openai.text().strip():
             save_secret("OPENAI_API_KEY", self.openai.text().strip(), prefer="keyring")
@@ -538,70 +601,18 @@ class MainWindow(QtWidgets.QMainWindow):
         act_settings = QtGui.QAction("Settings", self)
         act_settings.triggered.connect(self.open_settings)
         tb.addAction(act_settings)
+        
+        spacer = QtWidgets.QWidget()
+        spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        tb.addWidget(spacer)
 
-        act_shortcuts = QtGui.QAction("Keyboard Shortcuts", self)
-        shortcut_str = "Meta+/" if sys.platform == "darwin" else "Ctrl+/"
-        act_shortcuts.setShortcut(QtGui.QKeySequence(shortcut_str))
-        act_shortcuts.triggered.connect(self.show_shortcuts)
-        tb.addAction(act_shortcuts)
-        def do_clear():
-            if QtWidgets.QMessageBox.question(self, "Clear index", "Delete all indexed chunks?") == QtWidgets.QMessageBox.Yes:
-                clear_index()
-                self.ingest_log.appendPlainText("\nIndex cleared.")
-                self.status.showMessage("Index cleared")
-        def do_clear_cache():
-            if QtWidgets.QMessageBox.question(self, "Clear cache", "Delete all __pycache__ folders and .pyc files under the project?") == QtWidgets.QMessageBox.Yes:
-                n_dirs = 0
-                n_files = 0
-                try:
-                    for root, dirs, files in os.walk(str(ROOT)):
-                        for d in list(dirs):
-                            if d == "__pycache__":
-                                p = os.path.join(root, d)
-                                shutil.rmtree(p, ignore_errors=True)
-                                n_dirs += 1
-                        for f in files:
-                            if f.endswith(".pyc") or f.endswith(".pyo"):
-                                p = os.path.join(root, f)
-                                try:
-                                    os.remove(p)
-                                    n_files += 1
-                                except Exception:
-                                    pass
-                    self.ingest_log.appendPlainText(f"\nCache cleared. Removed {n_dirs} __pycache__ dirs and {n_files} bytecode files.")
-                    self.status.showMessage("Cache cleared")
-                except Exception as e:
-                    QtWidgets.QMessageBox.critical(self, "Clear cache", str(e))
+        help_btn_tb = QtWidgets.QToolButton()
+        help_btn_tb.setText("?")
+        help_btn_tb.setToolTip("Keyboard Shortcuts")
+        help_btn_tb.setAutoRaise(True)
+        help_btn_tb.clicked.connect(self.show_shortcuts)
+        tb.addWidget(help_btn_tb)
 
-        def do_clear_memory():
-            if QtWidgets.QMessageBox.question(self, "Clear memory", "Erase saved Q/A memory on disk and reset in-app history?") != QtWidgets.QMessageBox.Yes:
-                return
-            try:
-                self.history = []
-                try:
-                    if hasattr(mem, "clear"):
-                        mem.clear()
-                        cleared = True
-                    else:
-                        cleared = False
-                except Exception:
-                    cleared = False
-                msg = "Memory cleared" if cleared else "Couldn't clear memory."
-                self.ingest_log.appendPlainText("\n" + msg)
-                self.status.showMessage(msg)
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Clear memory", str(e))
-
-        act_cache = QtGui.QAction("Clear Cache", self)
-        act_cache.triggered.connect(do_clear_cache)
-        tb.addAction(act_cache)
-
-        act_mem = QtGui.QAction("Clear Memory", self)
-        act_mem.triggered.connect(do_clear_memory)
-        tb.addAction(act_mem)
-        act_clear = QtGui.QAction("Clear Index", self)
-        act_clear.triggered.connect(do_clear)
-        tb.addAction(act_clear)
 
         self.status = QtWidgets.QStatusBar()
         self.setStatusBar(self.status)
@@ -637,6 +648,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row = QtWidgets.QHBoxLayout()
         row.addWidget(self.pick_btn)
         row.addWidget(self.ingest_btn)
+        row.addStretch(1)
         self.sel_label = QtWidgets.QLabel("No files selected.")
         self.ingest_log = QtWidgets.QPlainTextEdit()
         self.ingest_log.setReadOnly(True)
@@ -673,7 +685,19 @@ class MainWindow(QtWidgets.QMainWindow):
         controls.addWidget(self.formula_cb)
         controls.addStretch(1)
 
-        self.quick_box = QtWidgets.QGroupBox("Quick settings")
+        qv = as_bool(read_prefs().get("UI_QUICK_VISIBLE", "true"))
+        self.quick_btn = QtWidgets.QToolButton()
+        self.quick_btn.setText("Quick settings")
+        self.quick_btn.setCheckable(True)
+        self.quick_btn.setChecked(qv)
+        self.quick_btn.setAutoRaise(True)
+        self.quick_btn.clicked.connect(lambda: self._on_quick_toggled(self.quick_btn.isChecked()))
+        controls2 = QtWidgets.QHBoxLayout()
+        controls2.setContentsMargins(0, 0, 0, 0)
+        controls2.addWidget(self.quick_btn)
+        controls2.addStretch(1)
+
+        self.quick_box = QtWidgets.QGroupBox("")
         self.quick_box.setFlat(True)
         self.quick_box.setStyleSheet(
             """
@@ -681,10 +705,13 @@ class MainWindow(QtWidgets.QMainWindow):
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 2px 6px; background: transparent; }
             """
         )
-        qv = as_bool(read_prefs().get("UI_QUICK_VISIBLE", "true"))
-        self.quick_box.setVisible(qv)
-        quick_layout = QtWidgets.QHBoxLayout(self.quick_box)
-        quick_layout.setContentsMargins(8, 8, 8, 8)
+        self.quick_box.setCheckable(False)
+        self.quick_box.setVisible(True)
+        self.quick_outer = QtWidgets.QVBoxLayout(self.quick_box)
+        self.quick_outer.setContentsMargins(8, 8, 8, 8)
+        self.quick_inner = QtWidgets.QWidget()
+        quick_layout = QtWidgets.QHBoxLayout(self.quick_inner)
+        quick_layout.setContentsMargins(0, 0, 0, 0)
 
         quick_layout.addWidget(QtWidgets.QLabel("Top-k:"))
         quick_layout.addWidget(self.k_spin)
@@ -733,8 +760,10 @@ class MainWindow(QtWidgets.QMainWindow):
         quick_layout.addSpacing(12)
         quick_layout.addWidget(self.agents_cb)
 
-
         quick_layout.addStretch(1)
+        self.quick_outer.addWidget(self.quick_inner)
+        
+        self._toggle_quick_contents(self.quick_btn.isChecked())
 
         self.reranker_combo.currentTextChanged.connect(self._persist_quick_prefs)
         self.pool_spin.valueChanged.connect(lambda _: self._persist_quick_prefs())
@@ -802,6 +831,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header_v.setSpacing(6)
         header_v.addWidget(self.input_bar)
         header_v.addLayout(controls)
+        header_v.addLayout(controls2)
         header_v.addWidget(self.quick_box)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
@@ -834,15 +864,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.selected_paths = []
         self.ingest_worker = None
         self.ask_worker = None
-
-        act_qs = QtGui.QAction("Quick Settings", self)
-        act_qs.setCheckable(True)
-        act_qs.setChecked(qv)
-        qs_shortcut = QtGui.QKeySequence("Meta+Shift+Q" if sys.platform == "darwin" else "Ctrl+Shift+Q")
-        act_qs.setShortcut(qs_shortcut)
-        act_qs.triggered.connect(self.toggle_quick_settings)
-        tb.addAction(act_qs)
-        self._act_quick_settings = act_qs
 
         focus_act = QtGui.QAction("Focus Ask", self)
         focus_act.setShortcut(QtGui.QKeySequence("Meta+L" if sys.platform == "darwin" else "Ctrl+L"))
@@ -928,7 +949,7 @@ class MainWindow(QtWidgets.QMainWindow):
         .formula-item {{ display: flex; align-items: baseline; gap: 8px; padding: 6px 10px; margin: 8px 0; border: 1px solid {border}; border-radius: 8px; }}
         .formula-item .fnum {{ font-weight: 700; min-width: 1.6em; text-align: center; border: 1px solid {border}; border-radius: 999px; padding: 1px 6px; opacity: 0.85; }}
         .formula-item .fbody {{ flex: 1; }}
-        .formula-item .flabel {{ display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom: 6px; }}
+        .formula-item .flabel {{ display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom: 2px; }}
         .formula-item .lname {{ font-weight:600; }}
         .formula-item .lcite {{ opacity:0.85; }}
         .formula-item .fformula {{ text-align:center; }}
@@ -975,14 +996,6 @@ class MainWindow(QtWidgets.QMainWindow):
             render_markdown(self.answer, md_text)
             self.answer_stack.setCurrentWidget(self.answer)
 
-    def toggle_quick_settings(self):
-        vis = not self.quick_box.isVisible()
-        self.quick_box.setVisible(vis)
-        if hasattr(self, "_act_quick_settings"):
-            self._act_quick_settings.setChecked(vis)
-        prefs = read_prefs()
-        prefs["UI_QUICK_VISIBLE"] = "true" if vis else "false"
-        write_prefs(prefs)
     def _apply_tab_style(self):
         pal = self.palette()
         win = pal.color(QtGui.QPalette.Window)
@@ -1027,6 +1040,9 @@ class MainWindow(QtWidgets.QMainWindow):
             margin-top: 6px;
             min-height: 28px;
         }}
+        QTabBar::tab:first {{
+            margin-left: 12px;
+        }}
         QTabBar::tab:hover {{
             background: {hover_bg};
         }}
@@ -1045,6 +1061,45 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_answer_style()
         super().changeEvent(e)
 
+    def _toggle_quick_contents(self, checked: bool):
+        """Show/hide the inner content of the Quick settings groupbox and collapse height when hidden."""
+        try:
+            if not hasattr(self, "quick_box"):
+                return
+            if checked:
+                if hasattr(self, "quick_inner") and self.quick_inner is not None:
+                    self.quick_inner.setVisible(True)
+                if hasattr(self, "quick_outer") and self.quick_outer is not None:
+                    self.quick_outer.setContentsMargins(8, 8, 8, 8)
+                self.quick_box.setVisible(True)
+                self.quick_box.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+                self.quick_box.setMaximumHeight(16777215)
+                self.quick_box.setStyleSheet(
+                    """
+                    QGroupBox { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; margin-top: 12px; }
+                    QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 2px 6px; background: transparent; }
+                    """
+                )
+            else:
+                if hasattr(self, "quick_inner") and self.quick_inner is not None:
+                    self.quick_inner.setVisible(False)
+                self.quick_box.setVisible(False)
+                self.quick_box.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                self.quick_box.setMaximumHeight(0)
+        except Exception:
+            pass
+
+    def _on_quick_toggled(self, checked: bool):
+        self._toggle_quick_contents(checked)
+        if hasattr(self, "quick_btn"):
+            try:
+                self.quick_btn.setChecked(checked)
+            except Exception:
+                pass
+        prefs = read_prefs()
+        prefs["UI_QUICK_VISIBLE"] = "true" if checked else "false"
+        write_prefs(prefs)
+    
     def _apply_answer_style(self):
         try:
             pal = self.palette()
