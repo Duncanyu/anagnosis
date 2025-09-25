@@ -1,6 +1,11 @@
 import sys, pathlib, traceback, json, os, shutil, re
 from PySide6 import QtWidgets, QtCore, QtGui
 
+try:
+    from PySide6 import QtWebEngineWidgets
+except Exception:
+    QtWebEngineWidgets = None
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -234,6 +239,25 @@ class AskWorker(QtCore.QThread):
             self.progress.emit("Searching index…")
             self.progress_pct.emit(10)
 
+            base_prefix = (
+                "Write normal text and structure in Markdown. "
+                "Typeset ALL mathematical expressions in LaTeX: use $...$ for inline and $$...$$ for display. "
+                "Do NOT wrap plain prose in \\text{...}. "
+                "Use standard LaTeX commands (\\frac, \\sqrt, ^, _). "
+                "Preserve citations as plain text.\n"
+            )
+            if self.formula_mode:
+                fmt_prefix = (
+                    base_prefix +
+                    "\nWhen listing formulas, format EACH item on ONE line exactly as: "
+                    "<label/meaning> — $$ <LaTeX formula> $$ [FileName.pdf p.N]. "
+                    "Put the citation AFTER the label, outside the math. "
+                    "Do not use bullets. Do not place citations inside $...$ or $$...$$.\n\n"
+                )
+            else:
+                fmt_prefix = base_prefix + "\n"
+            fmt_q = fmt_prefix + self.question
+
             base_pool = int(os.environ.get("ASK_CANDIDATES","300"))
             pool = int(os.environ.get("ASK_CANDIDATES_FORMULA","3000")) if self.formula_mode else base_pool
             self._pc = 12
@@ -276,7 +300,7 @@ class AskWorker(QtCore.QThread):
                         pct = 20 + int(70 * (done / max(1, total)))
                         pct = max(20, min(95, pct))
                         self.progress_pct.emit(pct)
-                out = summarize_all_formulas(self.question, top_chunks, progress_cb=p_cb)
+                out = summarize_all_formulas(fmt_q, top_chunks, progress_cb=p_cb)
                 if self.agents_enabled:
                     self._check_cancel()
                     try:
@@ -313,7 +337,7 @@ class AskWorker(QtCore.QThread):
                     x = dict(ch); x["_score"] = float(sc) if sc is not None else 0.0
                     chs.append(x)
                 self._check_cancel()
-                out = summarize_batched(self.question, chs, history=self.history, progress_cb=lambda s: self.progress.emit(s), max_batches=mb, time_budget_sec=tb, exhaustive=exh)
+                out = summarize_batched(fmt_q, chs, history=self.history, progress_cb=lambda s: self.progress.emit(s), max_batches=mb, time_budget_sec=tb, exhaustive=exh)
                 if self.agents_enabled:
                     self._check_cancel()
                     try:
@@ -747,10 +771,30 @@ class MainWindow(QtWidgets.QMainWindow):
         answer_toolbar_lay.addWidget(btn_clear)
         answer_toolbar_lay.addStretch(1)
         answer_toolbar_lay.addWidget(self.state_chip)
+        for b in (btn_copy, btn_save, btn_open, btn_clear):
+            b.setAutoRaise(True)
+        answer_toolbar.setStyleSheet(
+            "QToolButton { border: 0; background: transparent; padding: 2px 6px; }"
+            "QToolButton:hover { background: palette(midlight); border-radius: 4px; }"
+        )
 
+        self.answer_stack = QtWidgets.QStackedWidget()
         self.answer = QtWidgets.QTextBrowser()
         self.answer.setOpenExternalLinks(True)
         self.answer.setReadOnly(True)
+        self.answer_stack.addWidget(self.answer)
+
+        self.answer_web = None
+        if QtWebEngineWidgets is not None:
+            self.answer_web = QtWebEngineWidgets.QWebEngineView()
+            try:
+                self.answer_web.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+                self.answer_web.setStyleSheet("background: transparent")
+                if hasattr(self.answer_web, "page"):
+                    self.answer_web.page().setBackgroundColor(QtCore.Qt.transparent)
+            except Exception:
+                pass
+            self.answer_stack.addWidget(self.answer_web)
 
         header = QtWidgets.QWidget()
         header_v = QtWidgets.QVBoxLayout(header)
@@ -770,7 +814,9 @@ class MainWindow(QtWidgets.QMainWindow):
         answer_wrap_lay.setSpacing(2)
         answer_toolbar_lay.setSpacing(4)
         answer_wrap_lay.addWidget(answer_toolbar)
-        answer_wrap_lay.addWidget(self.answer)
+        answer_wrap_lay.addWidget(self.answer_stack)
+        self._answer_wrap = answer_wrap
+        self._apply_answer_style()
         splitter.addWidget(answer_wrap)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -815,6 +861,119 @@ class MainWindow(QtWidgets.QMainWindow):
         ctrl_dot_act.setShortcut(QtGui.QKeySequence(ctrl_dot))
         ctrl_dot_act.triggered.connect(self.cancel_current)
         self.addAction(ctrl_dot_act)
+    def _decorate_formula_items(self, md_text: str) -> str:
+        """Wrap single-line formula items with a styled container and add numbers.
+        Expected line form: <label> — $$ ... $$ [cite]
+        """
+        try:
+            pat = re.compile(r"^\s*(?![#>\-])(?P<label>.+?)\s+—\s+\$\$(?P<form>[\s\S]*?)\$\$(?:\s*(?P<cite>\[[^\]]+\]))?\s*$")
+            out_lines = []
+            idx = 0
+            for line in md_text.splitlines():
+                m = pat.match(line)
+                if m:
+                    idx += 1
+                    label = m.group('label').strip()
+                    form  = m.group('form').strip()
+                    cite  = (m.group('cite') or '').strip()
+                    html = (
+                        f"<div class=\"formula-item\">"
+                        f"  <span class=\"fnum\">{idx}</span>"
+                        f"  <div class=\"fbody\">"
+                        f"    <div class=\"flabel\"><span class=\"lname\">{label}</span>"
+                        f"      <span class=\"lcite\">{cite}</span></div>"
+                        f"    <div class=\"fformula\">$$ {form} $$</div>"
+                        f"  </div>"
+                        f"</div>"
+                    )
+                    out_lines.append(html)
+                else:
+                    out_lines.append(line)
+            return "\n".join(out_lines)
+        except Exception:
+            return md_text
+
+    def _build_md_math_html(self, inner_html: str) -> str:
+        pal = self.palette()
+        win = pal.color(QtGui.QPalette.Window)
+        lum = int(0.299*win.red() + 0.587*win.green() + 0.114*win.blue())
+        dark = lum < 140
+        text_color = "#dde2ea" if dark else "#23272d"
+        border = "rgba(255,255,255,0.13)" if dark else "#ddd"
+        link = "#6ab3fa" if dark else "#0366d6"
+        css = f"""
+        <style>
+        :root {{ --scale: 1.0; }}
+        body {{ font-family: -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+               line-height:1.5; margin:0; padding:12px; background:transparent; color:{text_color}; font-size: 13px; }}
+        h1 {{ font-size: 1.35em; margin: 0.75em 0 0.4em; }}
+        h2 {{ font-size: 1.2em;  margin: 0.6em 0 0.35em; }}
+        h3 {{ font-size: 1.1em;  margin: 0.6em 0 0.3em; }}
+        p  {{ margin: 0.5em 0; }}
+        code {{ background: transparent; padding: 2px 4px; border-radius: 4px; }}
+        pre  {{ background: transparent; padding: 8px; border-radius: 8px; overflow:auto; }}
+        ul  {{ margin: 0.4em 0 0.6em 1.2em; padding-left: 1.1em; }}
+        ol  {{ margin: 0.4em 0 0.6em 1.2em; padding-left: 1.2em; }}
+        blockquote {{ border-left: 3px solid {border}; padding-left: 8px; margin: 0.6em 0; }}
+        table {{ border-collapse: collapse; margin: 0.6em 0; }}
+        th,td {{ border:1px solid {border}; padding:4px 8px; }}
+        a {{ color: {link}; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+        /* MathJax sizing and spacing */
+        .mjx-container {{ font-size: 110%; margin: 0.35em 0; display: inline-block; vertical-align: middle; }}
+        /* Add breathing room between a formula and following text/citation */
+        .mjx-container + * {{ margin-left: 0.35em; }}
+        /* Hide bullets for math-only list items */
+        li:has(.mjx-container) {{ list-style: none; margin-left: -1.1em; }}
+        .formula-item {{ display: flex; align-items: baseline; gap: 8px; padding: 6px 10px; margin: 8px 0; border: 1px solid {border}; border-radius: 8px; }}
+        .formula-item .fnum {{ font-weight: 700; min-width: 1.6em; text-align: center; border: 1px solid {border}; border-radius: 999px; padding: 1px 6px; opacity: 0.85; }}
+        .formula-item .fbody {{ flex: 1; }}
+        .formula-item .flabel {{ display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom: 6px; }}
+        .formula-item .lname {{ font-weight:600; }}
+        .formula-item .lcite {{ opacity:0.85; }}
+        .formula-item .fformula {{ text-align:center; }}
+        </style>
+        """
+        mathjax = """
+        <script>
+        window.MathJax = {
+          tex: { inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
+                 displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']] },
+          options: { processHtmlClass: 'mjx-process', ignoreHtmlClass: 'no-mathjax' }
+        };
+        </script>
+        <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+        """
+        return f"<!doctype html><html><head><meta charset='utf-8'>{css}{mathjax}</head><body class='mjx-process'>{inner_html}</body></html>"
+
+
+    def render_answer(self, md_text):
+        if md_text is None:
+            md_text = ""
+        if QtWebEngineWidgets is not None and self.answer_web is not None:
+            try:
+                if self.formula_cb.isChecked():
+                    md_text = self._decorate_formula_items(md_text)
+            except Exception:
+                pass
+            if mdlib:
+                inner = mdlib.markdown(md_text, extensions=["fenced_code", "tables", "toc"])
+            else:
+                import html
+                inner = "<pre>" + html.escape(md_text) + "</pre>"
+            html = self._build_md_math_html(inner)
+            self.answer_web.setHtml(html)
+            try:
+                f = self.font()
+                if hasattr(self.answer_web, "settings"):
+                    s = self.answer_web.settings()
+                    s.setFontSize(s.FontSizeDefault, f.pointSize() if f.pointSize() > 0 else 13)
+            except Exception:
+                pass
+            self.answer_stack.setCurrentWidget(self.answer_web)
+        else:
+            render_markdown(self.answer, md_text)
+            self.answer_stack.setCurrentWidget(self.answer)
 
     def toggle_quick_settings(self):
         vis = not self.quick_box.isVisible()
@@ -883,7 +1042,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def changeEvent(self, e):
         if e.type() == QtCore.QEvent.PaletteChange:
             self._apply_tab_style()
+            self._apply_answer_style()
         super().changeEvent(e)
+
+    def _apply_answer_style(self):
+        try:
+            pal = self.palette()
+            base = pal.color(QtGui.QPalette.Base)
+            win = pal.color(QtGui.QPalette.Window)
+            lum = int(0.299*win.red() + 0.587*win.green() + 0.114*win.blue())
+            border = "rgba(255,255,255,0.14)" if lum < 140 else "rgba(0,0,0,0.15)"
+            if hasattr(self, "_answer_wrap") and self._answer_wrap is not None:
+                self._answer_wrap.setStyleSheet(
+                    f"QWidget {{ background: {base.name()}; border: 1px solid {border}; border-radius: 8px; }}"
+                )
+        except Exception:
+            pass
 
     def _toggle_memory(self):
         self.memory_enabled = self.mem_cb.isChecked()
@@ -1084,7 +1258,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ingest_log.appendPlainText("Suspect pages: []")
         self.status.showMessage(f"Ingested {info.get('num_docs',0)} file(s) — chunks: {info.get('num_chunks',0)}")
         md = "### Auto-summary\n\n" + info.get("doc_summary","")
-        render_markdown(self.answer, md)
+        self.render_answer(md)
         self.tabs.setCurrentIndex(1)
         self.cancel_btn.hide()
 
@@ -1106,7 +1280,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "Ask", "Type a question first.")
             return
         self.q_edit.clear()
-        render_markdown(self.answer, f"### Q: {q}\n\n_Working…_")
+        self.render_answer(f"### Q: {q}\n\n_Working…_")
         self.state_chip.setText("Working…")
         self.ask_btn_inbar.setEnabled(False)
         self.status_prog.show()
@@ -1154,7 +1328,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     agent_diag = "\n\n_Agents: ran._"
                 if isinstance(rep, str) and rep.strip():
                     agent_diag += "\n\n<details><summary>Agent report</summary>\n\n" + rep + "\n\n</details>"
-        render_markdown(self.answer, prefix + text + "\n\n**Citations:** " + cites + qmd + agent_diag)
+        self.render_answer(prefix + text + "\n\n**Citations:** " + cites + qmd + agent_diag)
         if self.memory_enabled and q and text:
             mem.append_turn(q, text)
             mem.prune_file(self.memory_file_limit_mb)
@@ -1166,7 +1340,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def ask_fail(self, msg):
         self.ask_btn_inbar.setEnabled(True)
-        render_markdown(self.answer, "**ERROR**\n\n```\n" + msg + "\n```")
+        self.render_answer("**ERROR**\n\n```\n" + msg + "\n```")
         self.state_chip.setText("Error")
         if str(msg).strip().startswith("Cancelled"):
             self.status.showMessage("Operation cancelled")
@@ -1215,7 +1389,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             with open(fn, "r", encoding="utf-8") as f:
                 text = f.read()
-            render_markdown(self.answer, text)
+            self.render_answer(text)
             self.status.showMessage(f"Loaded answer from {fn}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Open Answer", str(e))

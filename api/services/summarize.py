@@ -83,12 +83,16 @@ Context:
 CANONICAL_FORMULA_TEMPLATE = """You are a formula librarian. From ONLY the provided extracted math spans and snippets, produce a concise list of the CANONICAL formulas, laws, rules, identities, and named theorems relevant to the user’s question. 
 Requirements:
 - Group by short category headers (e.g., Derivatives, Integrals, Trigonometry, Series, Linear Algebra, Probability, Logic), but only if present.
-- For each item: show a compact formula in inline code, then 3–12 words of label/meaning.
-- Prefer definitions/theorems/rules over worked examples or exercise prompts.
-- Exclude problem statements, instructions (prove/show/compute), and numeric plug‑ins for particular values.
-- Keep each item to one line. 8–20 total items is ideal.
-- Include page citations in the form [FileName.pdf p.N] pulled from the supplied context next to each item.
+- For each item: use the exact format `<label/meaning> — $$ <LaTeX formula> $$ [FileName.pdf p.N]`.
+- Keep each item on ONE line (no bullets, no extra lines).
+- Place citations after the formula, outside math delimiters.
+- Prefer definitions/theorems/rules over worked examples.
+- Exclude problem statements, instructions, and numeric plug‑ins.
 - Do not invent formulas. If unsure, omit.
+
+Example output:
+Pythagorean identity — $$ \sin^2 x + \cos^2 x = 1 $$ [Calc101.pdf p.12]
+Double-angle identity — $$ \cos 2x = \cos^2 x - \sin^2 x $$ [TrigBook.pdf p.45]
 
 User question:
 {q}
@@ -454,16 +458,39 @@ def _rows_to_context(rows, char_budget=14000):
         used += len(line) + 1
     return "\n".join(parts)
 
+def _clean_math_citations(text: str) -> str:
+    if not text:
+        return text
+    text = re.sub(r"\$(.*?)\s*(\[[^\]]+\])\s*\$", r"$\1$ \2", text, flags=re.S)
+    text = re.sub(r"\$\$(.*?)\s*(\[[^\]]+\])\s*\$\$", r"$$\1$$ \2", text, flags=re.S)
+    text = re.sub(r"(\$\$|\$)(\s*)(\[[^\]]+\])", r"\1 \3", text)
+    return text
+
+_def_label_before_math = re.compile(r"(?m)^(?P<label>[^$\n].+?)\n(?P<math>\s*\$\$[\s\S]*?\$\$)\s*(?P<cite>\[[^\]]+\])?\s*$")
+_def_tight_citation   = re.compile(r"(?m)(\$\$[\s\S]*?\$\$)\s*(\[[^\]]+\])")
+
+def _normalize_formula_layout(text: str) -> str:
+    """Ensure each item follows the two-line layout:
+    $$ <LaTeX> $$ [File p.N]\n<label>
+    If a label precedes the display math, swap the order; also ensure a space before citations.
+    """
+    if not text:
+        return text
+    text = _def_label_before_math.sub(lambda m: f"{m.group('math')} {m.group('cite') or ''}\n{m.group('label')}".rstrip(), text)
+    text = _def_tight_citation.sub(r"\1 \2", text)
+    return text
+
 def _canonicalize_formulas(question, rows):
     cfg = load_config()
     ctx = _rows_to_context(rows)
     prompt = CANONICAL_FORMULA_TEMPLATE.format(q=question, ctx=ctx)
     if cfg.get("OPENAI_API_KEY"):
-        sys = "Return only canonical formulas with labels and page citations; no examples."
+        sys = "Return only canonical formulas as LaTeX math with plain‑text labels and page citations; no examples. Use $...$ or $$...$$ for the math."
         text, _ = _openai_chat([{"role":"system","content":sys},{"role":"user","content":prompt}], max_new_tokens=700)
     else:
-        full = "System: Return only canonical formulas with labels and page citations; no examples.\n" + prompt + "\nAssistant:"
+        full = "System: Return only canonical formulas as LaTeX math with plain‑text labels and page citations; no examples. Use $...$ or $$...$$ for the math.\n" + prompt + "\nAssistant:"
         text = _normalize_md(_hf_generate(full, max_new_tokens=700))
+    text = _clean_math_citations(text)
     return text
 
 def extract_formulas_from_chunks(chs, max_per_page=FORMULA_MAX_PER_PAGE, progress_cb=None, time_budget_sec=None, wants_explain=False, exhaustive_scan=False):
@@ -695,6 +722,7 @@ def summarize_all_formulas(question, chunks, progress_cb=None, exhaustive=None, 
         return {"answer":"Not found in sources.", "citations":[], "quotes":[]}
     rows.sort(key=lambda r: (r.get("source",""), r.get("page",0)))
     answer = _canonicalize_formulas(question, rows)
+    answer = _clean_math_citations(answer)
     raw_cites = _dedup_ordered([r.get("source","") for r in rows])
     cites = _compress_citations(raw_cites)[:10]
     if ASK_FORMULA_DEBUG:
@@ -1121,7 +1149,7 @@ def summarize(question, top_chunks, history=None):
     prompt = TEMPLATE.format(q=question, ctx=ctx, terms=terms)
     if cfg.get("OPENAI_API_KEY"):
         prefs = _pref_string()
-        sysmsg = "You extract key ideas and cite pages. Return Markdown." + (" " + prefs if prefs else "")
+        sysmsg = "You extract key ideas and cite pages. Return Markdown for prose; typeset all math in LaTeX using $...$ (inline) and $$...$$ (display)." + (" " + prefs if prefs else "")
         messages = [{"role": "system", "content": sysmsg}]
         if history:
             for turn in history[-8:]:
@@ -1131,6 +1159,7 @@ def summarize(question, top_chunks, history=None):
                     messages.append({"role": "assistant", "content": turn["a"]})
         messages.append({"role": "user", "content": prompt})
         text, _ = _openai_chat(messages, max_new_tokens=700)
+        text = _clean_math_citations(text)
     else:
         hist = ""
         if history:
@@ -1139,8 +1168,9 @@ def summarize(question, top_chunks, history=None):
                     hist += f"\nUser: {turn['q']}\n"
                 if turn.get("a"):
                     hist += f"Assistant: {turn['a']}\n"
-        full = "System: You extract key ideas from the provided context only. Return Markdown with citations like [FileName.pdf p.12]." + hist + "\n" + prompt + "\nAssistant:"
+        full = "System: You extract key ideas from the provided context only. Return Markdown for prose with citations like [FileName.pdf p.12]; typeset all math in LaTeX using $...$ / $$...$$." + hist + "\n" + prompt + "\nAssistant:"
         text = _normalize_md(_hf_generate(full, max_new_tokens=700))
+        text = _clean_math_citations(text)
     cites = []
     for c in used:
         cites.append(_fmt_source(c))
@@ -1186,7 +1216,7 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
     batches = _batch_chunks(ordered, BATCH_CHAR_BUDGET)
     if cfg.get("OPENAI_API_KEY"):
         prefs = _pref_string()
-        sysmsg = "You extract key ideas and cite pages. Return Markdown." + (" " + prefs if prefs else "")
+        sysmsg = "You extract key ideas and cite pages. Return Markdown for prose; typeset all math in LaTeX using $...$ (inline) and $$...$$ (display)." + (" " + prefs if prefs else "")
         hist_msgs = []
         if history:
             for turn in history[-4:]:
@@ -1239,7 +1269,8 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
             return summarize(question, ordered[:max(1, min(6, len(ordered)))], history=history)
         fuse_ctx = "\n\n---\n\n".join(parts)[:40000]
         fuse_prompt = "You are consolidating multiple partial answers derived strictly from course readings. Merge them into a single, non-redundant answer. Keep formulas, be precise, and keep citations from the partials in place.\n\nQuestion:\n" + question + "\n\nPartials:\n" + fuse_ctx
-        final, _ = _openai_chat([{"role": "system", "content": "Return a single clean Markdown answer with citations kept as-is."}, {"role": "user", "content": fuse_prompt}], max_new_tokens=800)
+        final, _ = _openai_chat([{"role": "system", "content": "Return a single clean Markdown answer (keep citations as-is) and typeset all math in LaTeX using $...$ / $$...$$."}, {"role": "user", "content": fuse_prompt}], max_new_tokens=800)
+        final = _clean_math_citations(final)
     else:
         parts = []
         seen_sources = []
@@ -1265,7 +1296,7 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
                         hist += f"\nUser: {turn['q']}\n"
                     if turn.get("a"):
                         hist += f"Assistant: {turn['a']}\n"
-            full = "System: You extract key ideas from the provided context only. Return Markdown with citations like [FileName.pdf p.12]." + hist + "\n" + prompt + "\nAssistant:"
+            full = "System: You extract key ideas from the provided context only. Return Markdown for prose with citations like [FileName.pdf p.12]; typeset all math in LaTeX using $...$ / $$...$$." + hist + "\n" + prompt + "\nAssistant:"
             ans = _normalize_md(_hf_generate(full, max_new_tokens=600))
             parts.append(ans)
             prev = set(seen_sources)
@@ -1280,7 +1311,8 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
             return summarize(question, ordered[:max(1, min(6, len(ordered)))], history=history)
         fuse_ctx = "\n\n---\n\n".join(parts)[:40000]
         fuse_prompt = "You are consolidating multiple partial answers derived strictly from course readings. Merge them into a single, non-redundant answer. Keep formulas, be precise, and keep citations from the partials in place.\n\nQuestion:\n" + question + "\n\nPartials:\n" + fuse_ctx
-        final = _normalize_md(_hf_generate("System: Consolidate the partials into one answer, preserving citations.\n" + fuse_prompt + "\nAssistant:", max_new_tokens=800))
+        final = _normalize_md(_hf_generate("System: Consolidate the partials into one Markdown answer, preserving citations; typeset all math in LaTeX using $...$ / $$...$$.\n" + fuse_prompt + "\nAssistant:", max_new_tokens=800))
+        final = _clean_math_citations(final)
     cites = []
     seen = set()
     for s in seen_sources:
