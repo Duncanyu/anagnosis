@@ -250,9 +250,9 @@ class AskWorker(QtCore.QThread):
                 fmt_prefix = (
                     base_prefix +
                     "\nWhen listing formulas, format EACH item on ONE line exactly as: "
-                    "<label/meaning> — $$ <LaTeX formula> $$ [FileName.pdf p.N]. "
-                    "Put the citation AFTER the label, outside the math. "
-                    "Do not use bullets. Do not place citations inside $...$ or $$...$$.\n\n"
+                    "<label/meaning> — $$ <LaTeX formula> $$ [FileName.pdf p.N] — <1–2 sentence explanation>. "
+                    "Put the citation AFTER the formula (not inside the math). "
+                    "Do not use bullets. Do not place citations or explanation inside $...$ or $$...$$. Keep explanations concise and factual.\n\n"
                 )
             else:
                 fmt_prefix = base_prefix + "\n"
@@ -754,6 +754,12 @@ class MainWindow(QtWidgets.QMainWindow):
         quick_layout.addSpacing(12)
         quick_layout.addWidget(self.mem_cb)
 
+        self.web_cb = QtWidgets.QCheckBox("Web search")
+        self.web_cb.setChecked(as_bool(prefs.get("ASK_WEB_SEARCH", os.environ.get("ASK_WEB_SEARCH", "false"))))
+        self.web_cb.setToolTip("Allow agents to fetch supporting evidence from the web (needs internet/API key)")
+        quick_layout.addSpacing(12)
+        quick_layout.addWidget(self.web_cb)
+
         self.agents_cb = QtWidgets.QCheckBox("Agents")
         self.agents_cb.setChecked(as_bool(prefs.get("ASK_AGENTS", os.environ.get("ASK_AGENTS", "false"))))
         self.agents_cb.setToolTip("Enable agentic verification and reasoning (slower)")
@@ -770,6 +776,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.time_spin.valueChanged.connect(lambda _: self._persist_quick_prefs())
         self.exh_cb.toggled.connect(lambda _: self._persist_quick_prefs())
         self.mem_cb.toggled.connect(self._toggle_memory)
+        self.web_cb.toggled.connect(lambda _: self._persist_quick_prefs())
         self.agents_cb.toggled.connect(lambda _: self._persist_quick_prefs())
 
         answer_toolbar = QtWidgets.QWidget()
@@ -883,11 +890,18 @@ class MainWindow(QtWidgets.QMainWindow):
         ctrl_dot_act.triggered.connect(self.cancel_current)
         self.addAction(ctrl_dot_act)
     def _decorate_formula_items(self, md_text: str) -> str:
-        """Wrap single-line formula items with a styled container and add numbers.
-        Expected line form: <label> — $$ ... $$ [cite]
+        """
+        Wrap single-line formula items with a styled container and add numbers.
+        Expected line form: <label> — $$ ... $$ [cite] — <explanation>
         """
         try:
-            pat = re.compile(r"^\s*(?![#>\-])(?P<label>.+?)\s+—\s+\$\$(?P<form>[\s\S]*?)\$\$(?:\s*(?P<cite>\[[^\]]+\]))?\s*$")
+            pat = re.compile(
+                r"^\s*(?![#>\-])"
+                r"(?P<label>.+?)\s+—\s+\$\$(?P<form>[\s\S]*?)\$\$"
+                r"(?:\s*(?P<cite>\[[^\]]+\]))?"
+                r"(?:\s+—\s+(?P<exp>.+))?"
+                r"\s*$"
+            )
             out_lines = []
             idx = 0
             for line in md_text.splitlines():
@@ -897,6 +911,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     label = m.group('label').strip()
                     form  = m.group('form').strip()
                     cite  = (m.group('cite') or '').strip()
+                    exp   = (m.group('exp') or '').strip()
                     html = (
                         f"<div class=\"formula-item\">"
                         f"  <span class=\"fnum\">{idx}</span>"
@@ -904,8 +919,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"    <div class=\"flabel\"><span class=\"lname\">{label}</span>"
                         f"      <span class=\"lcite\">{cite}</span></div>"
                         f"    <div class=\"fformula\">$$ {form} $$</div>"
-                        f"  </div>"
-                        f"</div>"
+                        + (f"    <div class=\"fexp\">{exp}</div>" if exp else "")
+                        + f"  </div>"
+                        + f"</div>"
                     )
                     out_lines.append(html)
                 else:
@@ -953,6 +969,7 @@ class MainWindow(QtWidgets.QMainWindow):
         .formula-item .lname {{ font-weight:600; }}
         .formula-item .lcite {{ opacity:0.85; }}
         .formula-item .fformula {{ text-align:center; }}
+        .formula-item .fexp {{ margin-top: 6px; opacity: 0.9; font-size: 0.95em; line-height: 1.35; }}
         </style>
         """
         mathjax = """
@@ -1219,12 +1236,14 @@ class MainWindow(QtWidgets.QMainWindow):
         prefs["ASK_CANDIDATES"] = int(self.pool_spin.value())
         prefs["ASK_TIME_BUDGET_SEC"] = int(self.time_spin.value())
         prefs["ASK_EXHAUSTIVE"] = "true" if self.exh_cb.isChecked() else "false"
+        prefs["ASK_WEB_SEARCH"] = "true" if self.web_cb.isChecked() else "false"
         prefs["ASK_AGENTS"] = "true" if self.agents_cb.isChecked() else "false"
         write_prefs(prefs)
         os.environ["ASK_RERANKER"] = prefs["ASK_RERANKER"]
         os.environ["ASK_CANDIDATES"] = str(prefs["ASK_CANDIDATES"])
         os.environ["ASK_TIME_BUDGET_SEC"] = str(prefs["ASK_TIME_BUDGET_SEC"])
         os.environ["ASK_EXHAUSTIVE"] = prefs["ASK_EXHAUSTIVE"]
+        os.environ["ASK_WEB_SEARCH"] = prefs["ASK_WEB_SEARCH"]
         os.environ["ASK_AGENTS"] = prefs["ASK_AGENTS"]
         self.update_key_status()
 
@@ -1243,6 +1262,8 @@ class MainWindow(QtWidgets.QMainWindow):
         bits.append(f"Exh: {prefs.get('ASK_EXHAUSTIVE') or os.environ.get('ASK_EXHAUSTIVE','false')}")
         agents_on = as_bool(prefs.get('ASK_AGENTS', os.environ.get('ASK_AGENTS','false')))
         bits.append(f"Agents: {'on' if agents_on else 'off'}")
+        web_on = as_bool(prefs.get('ASK_WEB_SEARCH', os.environ.get('ASK_WEB_SEARCH','false')))
+        bits.append(f"Web: {'on' if web_on else 'off'}")
         self.status.showMessage(" | ".join(bits))
 
     def cancel_current(self):
@@ -1378,11 +1399,32 @@ class MainWindow(QtWidgets.QMainWindow):
             rep = out.get("agent_report")
             if meta or self.agents_cb.isChecked():
                 if meta and meta.get("enabled"):
-                    agent_diag = "\n\n_Agents: " + ("modified._" if meta.get("changed") else "validated._")
+                    verdict = meta.get("verdict", "ran")
+                    if meta.get("changed"):
+                        verdict = "modified"
+                    kept = meta.get("kept_sentences")
+                    total = meta.get("total_sentences") or 0
+                    status_counts = meta.get("status_counts") or {}
+                    supported = status_counts.get("supported", 0)
+                    weak = status_counts.get("weak", 0)
+                    summary_bits = []
+                    if kept is not None and total:
+                        summary_bits.append(f"{kept}/{total} sentences kept")
+                    if supported:
+                        summary_bits.append(f"{supported} supported")
+                    if weak:
+                        summary_bits.append(f"{weak} need review")
+                    if meta.get("time_sec") is not None:
+                        summary_bits.append(f"{meta['time_sec']:.2f}s")
+                    summary = ", ".join(summary_bits)
+                    agent_diag = f"\n\n_Agents ({verdict}): " + (summary if summary else "completed") + "._"
                 else:
                     agent_diag = "\n\n_Agents: ran._"
                 if isinstance(rep, str) and rep.strip():
                     agent_diag += "\n\n<details><summary>Agent report</summary>\n\n" + rep + "\n\n</details>"
+                web_rep = meta.get("web_results_md") if isinstance(meta, dict) else None
+                if isinstance(web_rep, str) and web_rep.strip():
+                    agent_diag += "\n\n<details><summary>Web evidence</summary>\n\n" + web_rep + "\n\n</details>"
         self.render_answer(prefix + text + "\n\n**Citations:** " + cites + qmd + agent_diag)
         if self.memory_enabled and q and text:
             mem.append_turn(q, text)
