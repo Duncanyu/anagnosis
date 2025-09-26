@@ -46,21 +46,24 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     banner("training")
-    fit_kwargs = {
-        "epochs": cfg.get("epochs", 3),
-        "batch_size": cfg.get("batch_size", 32),
-        "warmup_ratio": cfg.get("warmup_ratio", 0.1),
-        "output_path": str(output_dir),
-        "show_progress_bar": True,
-    }
-
-    if "use_amp" in CrossEncoder.fit.__code__.co_varnames:
-        fit_kwargs["use_amp"] = (cfg.get("mixed_precision", "fp16") == "fp16")
+    epochs = cfg.get("epochs", 3)
+    batch_size = cfg.get("batch_size", 32)
+    warmup = cfg.get("warmup_ratio", 0.1)
+    use_amp = (cfg.get("mixed_precision", "fp16") == "fp16")
 
     try:
-        model.fit(train_samples, evaluator=None, **fit_kwargs)
+        model.fit(
+            train_samples,
+            evaluator=None,
+            epochs=epochs,
+            batch_size=batch_size,
+            warmup_ratio=warmup,
+            output_path=str(output_dir),
+            show_progress_bar=True,
+            use_amp=use_amp,
+        )
     except TypeError:
-        model.fit(train_samples, **fit_kwargs)
+        model.fit(train_samples)
 
     banner("validation")
     preds = model.predict([[ex.texts[0], ex.texts[1]] for ex in valid_samples])
