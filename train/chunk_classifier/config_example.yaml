@@ -1,8 +1,8 @@
 seed: 21
 model_name: sentence-transformers/all-MiniLM-L6-v2
-train_file: ./data/chunk_auto_labels.jsonl
+train_file: train/data/chunk_auto_labels.jsonl
 valid_frac: 0.1
-output_dir: ./outputs/chunk_classifier
+output_dir: train/outputs/chunk_classifier
 max_length: 256
 batch_size: 32
 lr: 3.0e-5
