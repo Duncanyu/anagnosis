@@ -34,58 +34,7 @@ Built on top of a custom **retrieval-augmented generation (RAG)** pipeline, it i
 
 ## System Overview  
 
-```mermaid
-flowchart TD
-
-  subgraph A["📥 Ingestion Layer"]
-    A1["PDF/Image Upload"] --> A2["Multi-Strategy Parser"]
-    A2 --> A3["PyMuPDF / PDFMiner / Poppler"]
-    A2 --> A4["OCR Recovery"]
-    A2 --> A5["Glyph Mapping & Span Salvage"]
-  end
-
-  subgraph B["🧩 Processing"]
-    A2 --> B1["Semantic Chunking"]
-    B1 --> B2["Heading Hierarchy"]
-    B1 --> B3["Math/Table Detection"]
-    B1 --> B4["Token Management"]
-    B1 --> F1["Formula Classifier (ONNX MiniLM)"]
-    B1 --> C1["Embedding Generator"]
-  end
-
-  subgraph C["📦 Storage"]
-    C1 --> C2["FAISS Index"]
-    F1 --> C3["Formula Metadata"]
-    B1 --> C4["Content Metadata"]
-  end
-
-  subgraph D["🔎 Retrieval"]
-    D1["User Query"] --> D2["Query Classifier"]
-    D2 --> D3["Semantic Retrieval (FAISS)"]
-    D3 --> D4["MMR Ordering"]
-    D4 --> D5["Cross-Encoder Reranking"]
-    D5 --> D6["Context Assembly"]
-    D6 --> D7["Response Generator (LLM)"]
-    D7 --> D8["Citations & References"]
-  end
-
-  subgraph E["💾 Memory"]
-    D6 --> E1["Conversation Context"]
-    E1 --> D6
-  end
-
-  subgraph F["🧮 Formula Mode"]
-    D2 --> F2["Formula Pipeline"]
-    F2 --> F3["Exhaustive Extraction"]
-    F2 --> F4["Span Scoring & Filtering"]
-    F2 --> F5["Canonical Formula Sheets"]
-  end
-
-  subgraph G["📤 Output"]
-    D8 --> G1["Desktop App"]
-    D8 --> G2["REST API"]
-  end
-```
+<img width="1147" height="468" alt="Screenshot 2025-09-25 at 11 06 08" src="https://github.com/user-attachments/assets/12f83b71-0489-4de3-9de5-45a73e7ba41e" />
 
 ---
 
