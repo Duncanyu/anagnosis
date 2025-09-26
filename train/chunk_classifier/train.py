@@ -9,6 +9,7 @@ yaml = __import__("yaml")
 from sklearn.metrics import classification_report
 from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
                           Trainer, TrainingArguments)
+import inspect
 
 if __package__ is None or __package__ == "":
     import sys
@@ -77,22 +78,30 @@ def main() -> None:
     output_dir = Path(cfg.get("output_dir", "./outputs/chunk_classifier")).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    training_args = TrainingArguments(
-        output_dir=str(output_dir),
-        learning_rate=cfg.get("lr", 3e-5),
-        per_device_train_batch_size=cfg.get("batch_size", 32),
-        per_device_eval_batch_size=cfg.get("batch_size", 32),
-        num_train_epochs=cfg.get("epochs", 4),
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
-        logging_steps=cfg.get("logging_steps", 100),
-        warmup_ratio=cfg.get("warmup_ratio", 0.1),
-        seed=cfg.get("seed", 21),
-        fp16=(cfg.get("mixed_precision", "fp16") == "fp16"),
-        load_best_model_at_end=True,
-        metric_for_best_model="macro_f1",
-        greater_is_better=True,
-    )
+    training_kwargs = {
+        "output_dir": str(output_dir),
+        "learning_rate": cfg.get("lr", 3e-5),
+        "per_device_train_batch_size": cfg.get("batch_size", 32),
+        "per_device_eval_batch_size": cfg.get("batch_size", 32),
+        "num_train_epochs": cfg.get("epochs", 4),
+        "logging_steps": cfg.get("logging_steps", 100),
+        "warmup_ratio": cfg.get("warmup_ratio", 0.1),
+        "seed": cfg.get("seed", 21),
+        "fp16": (cfg.get("mixed_precision", "fp16") == "fp16"),
+        "load_best_model_at_end": True,
+    }
+
+    sig = inspect.signature(TrainingArguments.__init__)
+    if "evaluation_strategy" in sig.parameters:
+        training_kwargs["evaluation_strategy"] = cfg.get("evaluation_strategy", "epoch")
+    if "save_strategy" in sig.parameters:
+        training_kwargs["save_strategy"] = cfg.get("save_strategy", "epoch")
+    if "metric_for_best_model" in sig.parameters:
+        training_kwargs["metric_for_best_model"] = "macro_f1"
+    if "greater_is_better" in sig.parameters:
+        training_kwargs["greater_is_better"] = True
+
+    training_args = TrainingArguments(**training_kwargs)
 
     def compute_metrics(eval_pred):
         preds = np.argmax(eval_pred.predictions, axis=-1)
