@@ -5,6 +5,10 @@ from api.services.embed import embed_texts, embedding_info
 from api.core.config import load_config
 from api.services import formula_cls
 from api.services import agent
+try:
+    from api.services import chunk_semantics
+except Exception:
+    chunk_semantics = None
 
 def _agent_enabled():
     try:
@@ -123,6 +127,11 @@ def add_chunks(chunks, progress_cb=None):
     start = int(m.get("count", 0))
     ids = list(range(start, start + len(kept)))
     kept = formula_cls.classify_chunks(kept, progress_cb=progress_cb)
+    if chunk_semantics is not None:
+        try:
+            chunk_semantics.classify_chunks(kept, batch_size=64, progress_cb=progress_cb)
+        except Exception:
+            pass
     m["count"] = start + len(kept)
     _write_meta(m)
     with ch_path.open("a", encoding="utf-8") as f:
@@ -322,6 +331,17 @@ def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None):
     ex_pen = np.array([-0.10 if (r.get("section_tag") or "").lower() == "exercises" else 0.0 for r in cand_rows], dtype=float)
     kw_terms = ("theorem","lemma","corollary","axiom","law","rule","identity","property","postulate","proposition")
     kw_bonus = np.array([0.08 if any(k in (r.get("text","" ).lower()) for k in kw_terms) else 0.0 for r in cand_rows], dtype=float)
+    sem_bonus = np.zeros(len(cand_rows), dtype=float)
+    for i, r in enumerate(cand_rows):
+        lab = (r.get("semantic_label") or "").lower()
+        if lab == "definition":
+            sem_bonus[i] = 0.10
+        elif lab in {"theorem", "rule"}:
+            sem_bonus[i] = 0.08
+        elif lab == "example":
+            sem_bonus[i] = -0.04
+        elif lab == "exercise":
+            sem_bonus[i] = -0.08
     if fflag:
         fb = []
         for r in cand_rows:
@@ -333,7 +353,7 @@ def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None):
         form_bonus = np.array(fb, dtype=float)
     else:
         form_bonus = np.zeros(len(cand_rows), dtype=float)
-    hybrid = 0.7 * emb_scores + 0.3 * bm25 + eq_bonus + ex_pen + kw_bonus + form_bonus
+    hybrid = 0.7 * emb_scores + 0.3 * bm25 + eq_bonus + ex_pen + kw_bonus + form_bonus + sem_bonus
     if progress_cb:
         progress_cb(f"Search: candidates {len(cand_rows)}")
     if t_end and time.time() >= t_end:
