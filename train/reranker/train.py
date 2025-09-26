@@ -74,16 +74,18 @@ def main() -> None:
         )
         steps_per_epoch = len(train_loader)
         warmup_steps = int(warmup * steps_per_epoch * epochs)
-        model.fit(
-            train_loader,
-            evaluator=None,
-            epochs=epochs,
-            steps_per_epoch=None,
-            scheduler="WarmupLinear",
-            warmup_steps=warmup_steps,
-            output_path=str(output_dir),
-            show_progress_bar=True,
-        )
+        legacy_kwargs = {
+            "epochs": epochs,
+            "warmup_steps": warmup_steps,
+            "output_path": str(output_dir),
+            "scheduler": "WarmupLinear",
+            "show_progress_bar": True,
+        }
+        try:
+            model.fit(train_loader, evaluator=None, **legacy_kwargs)
+        except TypeError:
+            legacy_kwargs.pop("scheduler", None)
+            model.fit(train_loader, evaluator=None, **legacy_kwargs)
 
     banner("validation")
     preds = model.predict([[ex.texts[0], ex.texts[1]] for ex in valid_samples])
