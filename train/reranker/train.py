@@ -4,6 +4,8 @@ from pathlib import Path
 import pandas as pd
 yaml = __import__("yaml")
 from sentence_transformers import CrossEncoder, InputExample
+import inspect
+from torch.utils.data import DataLoader
 
 if __package__ is None or __package__ == "":
     import sys
@@ -51,19 +53,37 @@ def main() -> None:
     warmup = cfg.get("warmup_ratio", 0.1)
     use_amp = (cfg.get("mixed_precision", "fp16") == "fp16")
 
-    try:
-        model.fit(
+    fit_sig = inspect.signature(model.fit)
+    if "train_samples" in fit_sig.parameters:
+        kwargs = {
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "warmup_ratio": warmup,
+            "output_path": str(output_dir),
+            "show_progress_bar": True,
+        }
+        if "use_amp" in fit_sig.parameters:
+            kwargs["use_amp"] = use_amp
+        model.fit(train_samples, evaluator=None, **kwargs)
+    else:
+        train_loader = DataLoader(
             train_samples,
+            shuffle=True,
+            batch_size=batch_size,
+            collate_fn=model.smart_batching_collate,
+        )
+        steps_per_epoch = len(train_loader)
+        warmup_steps = int(warmup * steps_per_epoch * epochs)
+        model.fit(
+            train_loader,
             evaluator=None,
             epochs=epochs,
-            batch_size=batch_size,
-            warmup_ratio=warmup,
+            steps_per_epoch=None,
+            scheduler="WarmupLinear",
+            warmup_steps=warmup_steps,
             output_path=str(output_dir),
             show_progress_bar=True,
-            use_amp=use_amp,
         )
-    except TypeError:
-        model.fit(train_samples)
 
     banner("validation")
     preds = model.predict([[ex.texts[0], ex.texts[1]] for ex in valid_samples])
