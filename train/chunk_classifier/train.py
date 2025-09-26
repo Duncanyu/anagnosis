@@ -92,14 +92,23 @@ def main() -> None:
     }
 
     sig = inspect.signature(TrainingArguments.__init__)
+    eval_name = None
     if "evaluation_strategy" in sig.parameters:
-        training_kwargs["evaluation_strategy"] = cfg.get("evaluation_strategy", "epoch")
+        eval_name = "evaluation_strategy"
+    elif "eval_strategy" in sig.parameters:
+        eval_name = "eval_strategy"
+
+    if eval_name:
+        training_kwargs[eval_name] = cfg.get("evaluation_strategy", cfg.get("eval_strategy", "epoch"))
     if "save_strategy" in sig.parameters:
         training_kwargs["save_strategy"] = cfg.get("save_strategy", "epoch")
     if "metric_for_best_model" in sig.parameters:
         training_kwargs["metric_for_best_model"] = "macro_f1"
     if "greater_is_better" in sig.parameters:
         training_kwargs["greater_is_better"] = True
+
+    if not eval_name:
+        training_kwargs["load_best_model_at_end"] = False
 
     training_args = TrainingArguments(**training_kwargs)
 
