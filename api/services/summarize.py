@@ -83,7 +83,8 @@ Context:
 CANONICAL_FORMULA_TEMPLATE = """You are a formula librarian. From ONLY the provided extracted math spans and snippets, produce a concise list of the CANONICAL formulas, laws, rules, identities, and named theorems relevant to the user’s question. 
 Requirements:
 - Group by short category headers (e.g., Derivatives, Integrals, Trigonometry, Series, Linear Algebra, Probability, Logic), but only if present.
-- For each item: use the exact format `<label/meaning> — $$ <LaTeX formula> $$ [FileName.pdf p.N]`.
+- For each item: use the exact format `<label/meaning> — $$ <LaTeX formula> $$ [FileName.pdf p.N] — <1–2 sentence explanation>`.
+- The explanation must briefly state what the formula means or how it is applied. Keep it short and factual.
 - Keep each item on ONE line (no bullets, no extra lines).
 - Place citations after the formula, outside math delimiters.
 - Prefer definitions/theorems/rules over worked examples.
@@ -91,8 +92,8 @@ Requirements:
 - Do not invent formulas. If unsure, omit.
 
 Example output:
-Pythagorean identity — $$ \sin^2 x + \cos^2 x = 1 $$ [Calc101.pdf p.12]
-Double-angle identity — $$ \cos 2x = \cos^2 x - \sin^2 x $$ [TrigBook.pdf p.45]
+Pythagorean identity — $$ \sin^2 x + \cos^2 x = 1 $$ [Calc101.pdf p.12] — This shows the fundamental relationship between sine and cosine.
+Double-angle identity — $$ \cos 2x = \cos^2 x - \sin^2 x $$ [TrigBook.pdf p.45] — Used to simplify expressions involving double angles.
 
 User question:
 {q}
@@ -108,6 +109,7 @@ MAX_BATCHES_DEFAULT = int(os.getenv("ASK_MAX_BATCHES", "6"))
 TIME_BUDGET_SEC_DEFAULT = int(os.getenv("ASK_TIME_BUDGET_SEC", "120"))
 MMR_TOP_N = int(os.getenv("ASK_MMR_TOP_N", "200"))
 MMR_ALPHA = float(os.getenv("ASK_MMR_ALPHA", "0.7"))
+MMR_ENABLE = (os.getenv("ASK_MMR_ENABLE", "1").lower() in {"1","true","yes","on"})
 ASK_EXHAUSTIVE_DEFAULT = (os.getenv("ASK_EXHAUSTIVE","0").lower() in {"1","true","yes","on"})
 ASK_CANDIDATES_DEFAULT = int(os.getenv("ASK_CANDIDATES","300"))
 RERANKER_NAME_DEFAULT = os.getenv("ASK_RERANKER","off").lower()
@@ -709,12 +711,19 @@ def summarize_all_formulas(question, chunks, progress_cb=None, exhaustive=None, 
     ma_ex  = [c for c in base if not c.get("is_equation") and c.get("has_math") and (c.get("section_tag") or "") == "exercises"]
 
     ordered = eq_non + ma_non + eq_ex + ma_ex
-    try:
-        use_name = RERANKER_NAME_DEFAULT if RERANKER_NAME_DEFAULT not in {"", "off", "none"} else "minilm"
-        rer_idx = _rerank(question, ordered, name=use_name, top_n=RERANK_TOP_N)
-        ordered = [ordered[i] for i in rer_idx]
-    except Exception:
-        pass
+    if MMR_ENABLE:
+        try:
+            mmr_idx = _mmr_order(question, ordered)
+            ordered = [ordered[i] for i in mmr_idx]
+        except Exception:
+            pass
+    if ASK_RERANK_IN_FORMULA:
+        try:
+            use_name = RERANKER_NAME_DEFAULT if RERANKER_NAME_DEFAULT not in {"", "off", "none"} else "minilm"
+            rer_idx = _rerank(question, ordered, name=use_name, top_n=RERANK_TOP_N)
+            ordered = [ordered[i] for i in rer_idx]
+        except Exception:
+            pass
     ask = (question or "").lower()
     wants_explain = any(k in ask for k in ("explain","why","derive","derivation","proof","prove","show"))
     rows, diag = extract_formulas_from_chunks(ordered, progress_cb=progress_cb, time_budget_sec=tb, wants_explain=wants_explain, exhaustive_scan=exhaustive)
@@ -1082,35 +1091,53 @@ def _score_chunk_for_order(c):
     return -s
 
 def _mmr_order(question, chs, top_n=MMR_TOP_N, alpha=MMR_ALPHA):
-    n = min(len(chs), top_n)
-    if n <= 2:
-        return list(range(len(chs)))
-    texts = [re.sub(r"\s+", " ", c["text"]).strip()[:800] for c in chs[:n]]
-    qv = embed_texts([question])[0]
-    dv = embed_texts(texts)
-    qv = qv / (np.linalg.norm(qv) + 1e-8)
-    dv = dv / (np.linalg.norm(dv, axis=1, keepdims=True) + 1e-8)
-    sims = dv @ qv
-    selected = []
-    candidates = list(range(n))
-    selected.append(int(np.argmax(sims)))
-    candidates.remove(selected[0])
-    while candidates:
-        mmr_scores = []
-        for idx in candidates:
-            rel = sims[idx]
-            if selected:
-                div = max(float(dv[idx] @ dv[j]) for j in selected)
-            else:
+    """Return diversified order indices via MMR.
+    Safety valves added:
+      - Hard cap on candidates via ASK_MMR_CAP (default 60)
+      - Short text slice to embed
+      - Wall‑clock timeout via ASK_MMR_TIMEOUT (default 6s)
+      - Graceful identity fallback on any issue
+    """
+    try:
+        t0 = time.time()
+        timeout_s = float(os.getenv("ASK_MMR_TIMEOUT", "6"))
+        cap = max(5, int(os.getenv("ASK_MMR_CAP", "60")))
+        n = min(len(chs), top_n, cap)
+        if n <= 2:
+            return list(range(len(chs)))
+        texts = [re.sub(r"\s+", " ", c.get("text", "")).strip()[:400] for c in chs[:n]]
+        qv = embed_texts([question])[0]
+        if time.time() - t0 > timeout_s:
+            return list(range(len(chs)))
+        dv = embed_texts(texts)
+        if time.time() - t0 > timeout_s:
+            return list(range(len(chs)))
+        qv = qv / (np.linalg.norm(qv) + 1e-8)
+        dv = dv / (np.linalg.norm(dv, axis=1, keepdims=True) + 1e-8)
+        sims = dv @ qv
+        selected = [int(np.argmax(sims))]
+        candidates = list(range(n))
+        candidates.remove(selected[0])
+        while candidates:
+            if time.time() - t0 > timeout_s:
+                return selected + candidates + list(range(n, len(chs)))
+            best = None
+            best_idx = None
+            for idx in candidates:
+                rel = sims[idx]
                 div = 0.0
-            mmr = alpha * rel - (1 - alpha) * div
-            mmr_scores.append((mmr, idx))
-        mmr_scores.sort(reverse=True)
-        pick = mmr_scores[0][1]
-        selected.append(pick)
-        candidates.remove(pick)
-    rest = list(range(n, len(chs)))
-    return selected + rest
+                if selected:
+                    div = max(float(dv[idx] @ dv[j]) for j in selected)
+                score = alpha * rel - (1.0 - alpha) * div
+                if (best is None) or (score > best):
+                    best = score
+                    best_idx = idx
+            selected.append(best_idx)
+            candidates.remove(best_idx)
+        rest = list(range(n, len(chs)))
+        return selected + rest
+    except Exception:
+        return list(range(len(chs)))
 
 def _batch_chunks(chs, budget_chars):
     out = []
@@ -1203,10 +1230,23 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
     if not sweep:
         max_batches = 1
     prim = sorted(base, key=_score_chunk_for_order)
-    try:
-        mmr_idx = _mmr_order(question, prim)
-        ordered = [prim[i] for i in mmr_idx]
-    except Exception:
+    if MMR_ENABLE:
+        if progress_cb:
+            try:
+                progress_cb("MMR selection…")
+            except Exception:
+                pass
+        try:
+            mmr_idx = _mmr_order(question, prim)
+            ordered = [prim[i] for i in mmr_idx]
+        except Exception:
+            ordered = prim
+        if progress_cb:
+            try:
+                progress_cb("MMR done")
+            except Exception:
+                pass
+    else:
         ordered = prim
     try:
         rer_idx = _rerank(question, ordered, name=RERANKER_NAME_DEFAULT, top_n=RERANK_TOP_N)

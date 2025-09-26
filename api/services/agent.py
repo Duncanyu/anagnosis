@@ -2,6 +2,11 @@ from typing import List, Dict, Any, Tuple
 import os, re, time
 
 try:
+    from api.services import websearch
+except Exception:
+    websearch = None
+
+try:
     import sympy as sp
 except Exception:
     sp = None
@@ -242,6 +247,31 @@ def _sft_mask(lines: List[str]) -> List[bool]:
         return [True for _ in lines]
 
 
+def _trim_sentence(sent: str, limit: int = 140) -> str:
+    s = (sent or "").strip()
+    if len(s) <= limit:
+        return s
+    return s[: limit - 1].rstrip() + "…"
+
+
+def _status_from_score(score: float, threshold: float, strong: float) -> str:
+    if score >= strong:
+        return "supported"
+    if score >= threshold:
+        return "weak"
+    return "missing"
+
+
+def _support_badge(status: str) -> str:
+    if status == "supported":
+        return "✅"
+    if status in {"formula", "weak"}:
+        return "⚠️"
+    if status == "skipped":
+        return "➖"
+    return "❌"
+
+
 def verify_answer(question: str, out: Any, hits: List[Dict[str, Any]], time_budget_sec: int = 10, **kwargs) -> Any:
     t0 = time.time()
     policy = os.environ.get("AGENT_POLICY", "off").lower()
@@ -262,32 +292,54 @@ def verify_answer(question: str, out: Any, hits: List[Dict[str, Any]], time_budg
     citations = [] if isinstance(out, str) else list(out.get("citations", []))
     diag: Dict[str, Any] = {}
     diag["policy"] = policy
+    diag["enabled"] = True
 
     base_cand = _chunk_texts(hits)
     sens = _sentences(draft)
     keep_sens: List[str] = []
+    kept_set = set()
     supp_cites: List[str] = []
     th = 0.08
     formula_mode = as_bool(os.environ.get("ASK_FORMULA_MODE", "false"))
 
+    sent_infos: List[Dict[str, Any]] = []
     for s in sens:
         sc, tag = _support_score(s, base_cand)
+        entry = {"sentence": s, "score": sc, "source": tag or "", "status": "unchecked"}
+        sent_infos.append(entry)
         if formula_mode and _is_exercise_like(s):
+            entry["status"] = "skipped"
             continue
         if sc >= th or (formula_mode and _is_formulaish(s)):
             keep_sens.append(s)
+            kept_set.add(s)
             if tag:
                 supp_cites.append(tag)
+            entry["status"] = "supported" if sc >= th else "formula"
+        elif sc > 0:
+            entry["status"] = "weak"
 
     if formula_mode and keep_sens:
         m = _sft_mask(keep_sens)
-        keep_sens = [x for x, k in zip(keep_sens, m) if k]
+        filtered = []
+        for s, flag in zip(keep_sens, m):
+            if flag:
+                filtered.append(s)
+            else:
+                for info in sent_infos:
+                    if info["sentence"] == s:
+                        info["status"] = "skipped"
+                        break
+        keep_sens = filtered
+        kept_set = set(keep_sens)
 
     if not keep_sens and sens:
         keep_sens = sens[:1]
+        kept_set = set(keep_sens)
 
     pruned = " ".join(keep_sens).strip()
 
+    more_cand: List[Tuple[str, str]] = []
     if len(pruned) < max(48, int(len(draft) * 0.4)) and (time.time() - t0) < time_budget_sec * 0.7:
         try:
             from api.services.index import search as _search
@@ -301,14 +353,20 @@ def verify_answer(question: str, out: Any, hits: List[Dict[str, Any]], time_budg
                 res = _search(qv, k=6, time_budget_sec=min(6, rem), strict_doc=strict)
                 more_hits.extend(res.get("hits", []))
             more_cand = _chunk_texts([h[1] for h in more_hits])
-            for s in sens:
-                if s in keep_sens:
+            for info in sent_infos:
+                s = info["sentence"]
+                if s in kept_set or info["status"] == "skipped":
                     continue
-                sc, tag = _support_score(s, more_cand)
-                if sc >= th or (formula_mode and _is_formulaish(s)):
+                sc2, tag2 = _support_score(s, more_cand)
+                if sc2 > info["score"]:
+                    info["score"] = sc2
+                    info["source"] = tag2 or info["source"]
+                if sc2 >= th or (formula_mode and _is_formulaish(s)):
                     keep_sens.append(s)
-                    if tag:
-                        supp_cites.append(tag)
+                    kept_set.add(s)
+                    if tag2:
+                        supp_cites.append(tag2)
+                    info["status"] = "supported" if sc2 >= th else "formula"
             pruned = " ".join(keep_sens).strip()
         except Exception:
             pass
@@ -342,17 +400,92 @@ def verify_answer(question: str, out: Any, hits: List[Dict[str, Any]], time_budg
 
     quotes = extract_quotes_from_hits(base_cand)
 
+    diag["changed"] = bool(pruned and pruned != draft)
+
+    strong_th = 0.2
+    for info in sent_infos:
+        if info["status"] in {"supported", "formula", "skipped"}:
+            continue
+        info["status"] = _status_from_score(info["score"], th, strong_th)
+
     diag["kept_sentences"] = len(keep_sens)
     diag["pruned"] = len(sens) - len(keep_sens)
+    diag["total_sentences"] = len(sens)
+    diag["verdict"] = "trimmed" if len(keep_sens) < len(sens) else "validated"
+    diag["time_sec"] = round(time.time() - t0, 3)
+
+    support_rows = []
+    for info in sent_infos:
+        trimmed = _trim_sentence(info["sentence"], limit=160).replace("|", "\\|")
+        support_rows.append({
+            "sentence": trimmed,
+            "score": round(float(info["score"]), 3),
+            "source": info["source"] or "-",
+            "status": info["status"],
+        })
+
+    diag["support"] = support_rows
+    status_counts: Dict[str, int] = {}
+    for row in support_rows:
+        status_counts[row["status"]] = status_counts.get(row["status"], 0) + 1
+    diag["status_counts"] = status_counts
+
+    web_results: List[Dict[str, Any]] = []
+    if websearch is not None and as_bool(os.environ.get("ASK_WEB_SEARCH", "false")):
+        unresolved = [info for info in sent_infos if info["status"] in {"weak", "missing"}]
+        queries: List[str] = []
+        queries.extend([info["sentence"] for info in unresolved[:2]])
+        if not queries:
+            queries.append(question)
+        seen = set()
+        for qv in queries:
+            res = websearch.search_web(qv, max_results=4)
+            if not res:
+                continue
+            for item in res:
+                url = item.get("url")
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                web_results.append(item)
+            if len(web_results) >= 6:
+                break
+    diag["web_results"] = web_results
+
+    report_lines = ["| Sentence | Support | Source |", "| --- | --- | --- |"]
+    for row in support_rows[:12]:
+        badge = _support_badge(row["status"])
+        report_lines.append(f"| {row['sentence']} | {row['score']:.2f} {badge} | {row['source']} |")
+    report_md = "\n".join(report_lines)
+    diag["report_md"] = report_md
+
+    if web_results:
+        web_lines = ["| Result | Snippet |", "| --- | --- |"]
+        for item in web_results[:6]:
+            title = item.get("title") or item.get("url") or "result"
+            url = item.get("url")
+            snippet = (item.get("snippet") or "").replace("|", " ")
+            title_md = f"[{title}]({url})" if url else title
+            web_lines.append(f"| {title_md} | {snippet} |")
+        diag["web_results_md"] = "\n".join(web_lines)
 
     if isinstance(out, dict):
         out_ans = pruned if pruned else draft
         out["answer"] = out_ans
         out["citations"] = cites
         out["quotes"] = quotes
-        agent_state = out.get("agent", {})
+        agent_state = dict(out.get("agent", {}))
         agent_state.update(diag)
         out["agent"] = agent_state
+        out["agent_meta"] = diag
+        out["agent_report"] = report_md
         return out
 
-    return {"answer": pruned if pruned else draft, "citations": cites, "quotes": quotes, "agent": diag}
+    return {
+        "answer": pruned if pruned else draft,
+        "citations": cites,
+        "quotes": quotes,
+        "agent": diag,
+        "agent_meta": diag,
+        "agent_report": report_md,
+    }
