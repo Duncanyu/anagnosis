@@ -17,6 +17,8 @@ WANTED_KEYS = [
     "LLM_BACKEND",
     "RERANK_BACKEND",
     "QDRANT_URL",
+    "SERPAPI_KEY",
+    "BRAVE_API_KEY",
 ]
 
 def _load_json_config() -> Dict[str, str]:

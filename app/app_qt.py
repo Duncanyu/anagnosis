@@ -1,4 +1,5 @@
-import sys, pathlib, traceback, json, os, shutil, re
+import sys, pathlib, traceback, json, os, shutil, re, urllib.parse
+from collections import Counter
 from PySide6 import QtWidgets, QtCore, QtGui
 
 try:
@@ -221,24 +222,33 @@ class AskWorker(QtCore.QThread):
     finished = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
 
-    def __init__(self, question, k, history, formula_mode=False, agents_enabled=False):
+    def __init__(self, question, k, history, formula_mode=False, agents_enabled=False, web_enabled=False):
         super().__init__()
         self.question = question
         self.k = k
         self.history = history
         self.formula_mode = formula_mode
         self.agents_enabled = agents_enabled
-    
+        self.web_enabled = web_enabled
+
     def _check_cancel(self):
         if self.isInterruptionRequested():
             raise RuntimeError("Cancelled")
 
+    def _token_overlap(self, q_text, chunk_text):
+        qtoks = [t for t in re.findall(r"[A-Za-z0-9_]+", (q_text or "").lower()) if len(t) > 2]
+        if not qtoks:
+            return 0.0
+        ctoks = [t for t in re.findall(r"[A-Za-z0-9_]+", (chunk_text or "").lower()) if len(t) > 2]
+        if not ctoks:
+            return 0.0
+        cset = Counter(ctoks)
+        shared = sum(1 for t in qtoks if cset.get(t, 0) > 0)
+        return shared / max(1, len(qtoks))
+
     def run(self):
         try:
             self._check_cancel()
-            self.progress.emit("Searching index…")
-            self.progress_pct.emit(10)
-
             base_prefix = (
                 "Write normal text and structure in Markdown. "
                 "Typeset ALL mathematical expressions in LaTeX: use $...$ for inline and $$...$$ for display. "
@@ -258,31 +268,172 @@ class AskWorker(QtCore.QThread):
                 fmt_prefix = base_prefix + "\n"
             fmt_q = fmt_prefix + self.question
 
-            base_pool = int(os.environ.get("ASK_CANDIDATES","300"))
-            pool = int(os.environ.get("ASK_CANDIDATES_FORMULA","3000")) if self.formula_mode else base_pool
-            self._pc = 12
-            def s_cb(msg):
-                self.progress.emit(msg)
-                self._pc = min(55, self._pc + 3)
-                self.progress_pct.emit(self._pc)
+            history = list(self.history or [])
+            q_lower = (self.question or "").strip().lower()
+            if history:
+                last = history[-1]
+                if re.search(r"what\s+(?:was|is)\s+(?:my|the)\s+(?:last|previous)\s+question", q_lower):
+                    prev_q = last.get("q") or "(unknown)"
+                    text = f"Your previous question was:\n\n> {prev_q}"
+                    self.finished.emit({"answer": text, "citations": [], "quotes": []})
+                    return
+                if re.search(r"what\s+(?:was|is)\s+(?:your|the)\s+(?:last|previous)\s+answer", q_lower) or re.search(r"repeat\s+your\s+(?:last|previous)\s+answer", q_lower):
+                    prev_a = last.get("a") or "(no recent answer recorded)"
+                    text = "Here is my previous answer:\n\n" + prev_a
+                    self.finished.emit({"answer": text, "citations": [], "quotes": []})
+                    return
 
             tb_base = int(os.environ.get("ASK_TIME_BUDGET_SEC","120"))
             tb = int(os.environ.get("ASK_TIME_BUDGET_SEC_FORMULA","240")) if self.formula_mode else tb_base
-            st_base = max(10, min(tb_base//2, 30))
-            st = int(os.environ.get("SEARCH_TIMEOUT_SEC", str(st_base)))
-            if self.formula_mode:
-                st = int(os.environ.get("SEARCH_TIMEOUT_SEC_FORMULA", str(max(20, min(tb//2, 60)))))
+            web_chunks = []
+            web_hits = []
+            max_web_overlap = 0.0
+            provider_cfg = {}
+            try:
+                provider_cfg = load_config() or {}
+            except Exception:
+                provider_cfg = {}
+            provider_label = provider_cfg.get("WEB_SEARCH_PROVIDER") or os.environ.get("WEB_SEARCH_PROVIDER") or "duckduckgo"
+            if self.web_enabled:
+                self.progress.emit(f"Web search ({provider_label})…")
+                try:
+                    from api.services import websearch
+                    web_results = websearch.search_web(self.question, max_results=6)
+                except Exception:
+                    web_results = []
+                if web_results:
+                    self.progress.emit(f"Web results: {len(web_results)}")
+                else:
+                    self.progress.emit("Web search returned no results.")
+                from urllib.parse import urlparse
+                for res in web_results:
+                    snippet = (res.get("snippet") or "").strip()
+                    title = (res.get("title") or "").strip()
+                    if not snippet and not title:
+                        continue
+                    text = (title + "\n" + snippet).strip()
+                    url = res.get("url") or ""
+                    host = urlparse(url).netloc or (res.get("source") or "web")
+                    chunk = {
+                        "text": text,
+                        "doc_name": f"Web:{host}",
+                        "page_start": 1,
+                        "page_end": 1,
+                        "section_tag": "web",
+                        "web_url": url,
+                        "is_web": True,
+                        "_score": 0.85,
+                    }
+                    max_web_overlap = max(max_web_overlap, self._token_overlap(self.question, text))
+                    web_chunks.append(chunk)
+                    web_hits.append((0.85, chunk))
 
-            self._check_cancel()
-            hits = search(self.question, k=pool, progress_cb=s_cb, timeout_sec=st, pool=pool)
-            self._check_cancel()
-            self.progress.emit(f"Hits: {len(hits)}")
-            if not hits:
-                self.progress_pct.emit(100)
-                self.finished.emit({"answer": "**No results. Ingest a document first.**", "citations": []})
-                return
+            doc_reference = bool(re.search(r"(textbook|chapter|section|lecture|notes|\.(pdf|docx))", self.question.lower()))
 
-            top_chunks = [h[1] for h in hits]
+            rel_score, rel_meta = agent.estimate_relevance(self.question)
+            relevance_threshold = float(os.getenv("ASK_RAG_MIN_RELEVANCE", "0.20"))
+            self.progress.emit(f"Relevance score: {rel_score if rel_score is not None else 'n/a'}")
+
+            use_rag = not self.web_enabled
+            if self.web_enabled:
+                if not web_chunks:
+                    use_rag = True
+                elif doc_reference:
+                    use_rag = True
+                else:
+                    overlap_threshold = float(os.getenv("ASK_WEB_MIN_OVERLAP", "0.45"))
+                    use_rag = max_web_overlap < overlap_threshold
+            if rel_score is not None and rel_score < relevance_threshold and not doc_reference:
+                use_rag = False
+
+            hits = []
+            base_chunks = []
+            rag_scores = []
+            rag_chunks = []
+            mem_chunks = []
+            history = list(self.history or [])
+
+            if use_rag:
+                base_pool = int(os.environ.get("ASK_CANDIDATES","300"))
+                pool = int(os.environ.get("ASK_CANDIDATES_FORMULA","3000")) if self.formula_mode else base_pool
+                self._pc = 12
+
+                def s_cb(msg):
+                    self.progress.emit(msg)
+                    self._pc = min(55, self._pc + 3)
+                    self.progress_pct.emit(self._pc)
+
+                st_base = max(10, min(tb_base//2, 30))
+                st = int(os.environ.get("SEARCH_TIMEOUT_SEC", str(st_base)))
+                if self.formula_mode:
+                    st = int(os.environ.get("SEARCH_TIMEOUT_SEC_FORMULA", str(max(20, min(tb//2, 60)))))
+
+                self._check_cancel()
+                self.progress.emit("Searching index…")
+                hits = search(self.question, k=pool, progress_cb=s_cb, timeout_sec=st, pool=pool)
+                self._check_cancel()
+                self.progress.emit(f"Hits: {len(hits)}")
+                base_chunks = [h[1] for h in hits]
+                rag_scores = [float(h[0]) for h in hits]
+                for sc, ch in hits[: self.k]:
+                    x = dict(ch)
+                    x["_score"] = float(sc)
+                    rag_chunks.append(x)
+                if not hits and not web_chunks:
+                    self.progress_pct.emit(100)
+                    self.finished.emit({"answer": "**No local results. Try web search.**", "citations": []})
+                    return
+            else:
+                self.progress.emit("Using web results only…")
+                if not web_chunks:
+                    self.progress_pct.emit(100)
+                    self.finished.emit({"answer": "**No web results found for this question.**", "citations": [], "quotes": []})
+                    return
+
+            rag_threshold = float(os.getenv("ASK_WEB_MIN_RAG", "0.35"))
+
+            if self.web_enabled and web_chunks:
+                if use_rag and rag_scores and rag_scores[0] >= rag_threshold:
+                    top_chunks = list(web_chunks) + rag_chunks
+                elif use_rag and rag_chunks:
+                    top_chunks = list(web_chunks) + rag_chunks
+                else:
+                    top_chunks = list(web_chunks)
+            else:
+                top_chunks = rag_chunks
+
+            if history:
+                for idx, turn in enumerate(history[-3:], 1):
+                    q_prev = (turn.get("q") or "").strip()
+                    a_prev = (turn.get("a") or "").strip()
+                    if not q_prev and not a_prev:
+                        continue
+                    parts = []
+                    if q_prev:
+                        parts.append(f"Prev question: {q_prev}")
+                    if a_prev:
+                        parts.append(f"Prev answer: {a_prev}")
+                    text_mem = "\n".join(parts)
+                    if not text_mem:
+                        continue
+                    mem_chunks.append({
+                        "text": text_mem,
+                        "doc_name": "Conversation memory",
+                        "page_start": idx,
+                        "page_end": idx,
+                        "section_tag": "memory",
+                        "is_memory": True,
+                        "_score": 0.55,
+                    })
+            if mem_chunks:
+                top_chunks.extend(mem_chunks)
+
+            if self.web_enabled and web_chunks and not use_rag:
+                combined_hits = list(web_hits) if web_hits else [(0.0, c) for c in web_chunks]
+            else:
+                combined_hits = list(hits) + (web_hits if web_hits else [(0.85, c) for c in web_chunks])
+            if mem_chunks:
+                combined_hits.extend([(0.55, ch) for ch in mem_chunks])
 
             if self.formula_mode:
                 self._check_cancel()
@@ -307,7 +458,7 @@ class AskWorker(QtCore.QThread):
                         self.progress.emit("Agents: verifying…")
                         agent_budget = int(os.environ.get("AGENT_VERIFY_BUDGET", "30"))
                         _prev = out if isinstance(out, dict) else {"answer": str(out)}
-                        _res = agent.verify_answer(self.question, out, hits, time_budget_sec=agent_budget)
+                        _res = agent.verify_answer(self.question, out, combined_hits, time_budget_sec=agent_budget)
                         changed = False
                         try:
                             changed = (_res.get("answer", "") != _prev.get("answer", ""))
@@ -328,14 +479,7 @@ class AskWorker(QtCore.QThread):
                 self.progress_pct.emit(60)
                 mb = int(os.environ.get("ASK_MAX_BATCHES","6"))
                 exh = os.environ.get("ASK_EXHAUSTIVE","false").lower() in {"1","true","yes","on"}
-                chs = []
-                for h in hits:
-                    try:
-                        sc, ch = h[0], h[1]
-                    except Exception:
-                        sc, ch = 0.0, h[1] if isinstance(h, (list, tuple)) and len(h) > 1 else h
-                    x = dict(ch); x["_score"] = float(sc) if sc is not None else 0.0
-                    chs.append(x)
+                chs = list(top_chunks)
                 self._check_cancel()
                 out = summarize_batched(fmt_q, chs, history=self.history, progress_cb=lambda s: self.progress.emit(s), max_batches=mb, time_budget_sec=tb, exhaustive=exh)
                 if self.agents_enabled:
@@ -344,7 +488,7 @@ class AskWorker(QtCore.QThread):
                         self.progress.emit("Agents: verifying…")
                         agent_budget = int(os.environ.get("AGENT_VERIFY_BUDGET", "30"))
                         _prev = out if isinstance(out, dict) else {"answer": str(out)}
-                        _res = agent.verify_answer(self.question, out, hits, time_budget_sec=agent_budget)
+                        _res = agent.verify_answer(self.question, out, combined_hits, time_budget_sec=agent_budget)
                         changed = False
                         try:
                             changed = (_res.get("answer", "") != _prev.get("answer", ""))
@@ -367,6 +511,20 @@ class AskWorker(QtCore.QThread):
                 pass
 
             self.progress_pct.emit(100)
+            if isinstance(out, dict) and self.web_enabled and web_chunks:
+                try:
+                    rep = out.get("agent_report") or ""
+                    if rep and "Web evidence" not in rep:
+                        links = []
+                        for ch in web_chunks[:3]:
+                            url = ch.get("web_url")
+                            if url:
+                                links.append(f"- {url}")
+                        if links:
+                            extra = "\n\n**Web sources**\n" + "\n".join(links)
+                            out["answer"] = (out.get("answer") or "") + extra
+                except Exception:
+                    pass
             self.finished.emit(out)
         except Exception as e:
             tb = traceback.format_exc()
@@ -429,7 +587,12 @@ class SettingsDialog(QtWidgets.QDialog):
         self.ask_max_batches.setSingleStep(1)
         self.ask_max_batches.setValue(int(prefs.get("ASK_MAX_BATCHES", os.environ.get("ASK_MAX_BATCHES", "6"))))
 
-        for le in [self.openai, self.hf, self.openai_model, self.hf_name]:
+        self.serpapi = QtWidgets.QLineEdit(cfg.get("SERPAPI_KEY") or "")
+        self.serpapi.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.brave_key = QtWidgets.QLineEdit(cfg.get("BRAVE_API_KEY") or cfg.get("BRAVE_SEARCH_KEY") or "")
+        self.brave_key.setEchoMode(QtWidgets.QLineEdit.Password)
+
+        for le in [self.openai, self.hf, self.serpapi, self.brave_key, self.openai_model, self.hf_name]:
             le.setClearButtonEnabled(True)
             le.setMinimumWidth(300)
             le.setDragEnabled(True)
@@ -447,6 +610,8 @@ class SettingsDialog(QtWidgets.QDialog):
         keys_form = QtWidgets.QFormLayout(keys_w)
         keys_form.addRow("OPENAI_API_KEY", self.openai)
         keys_form.addRow("HF_TOKEN", self.hf)
+        keys_form.addRow("SERPAPI_KEY", self.serpapi)
+        keys_form.addRow("BRAVE_API_KEY", self.brave_key)
         tabs.addTab(keys_w, "Keys")
 
         models_w = QtWidgets.QWidget()
@@ -547,6 +712,10 @@ class SettingsDialog(QtWidgets.QDialog):
             save_secret("OPENAI_API_KEY", self.openai.text().strip(), prefer="keyring")
         if self.hf.text().strip():
             save_secret("HF_TOKEN", self.hf.text().strip(), prefer="keyring")
+        if self.serpapi.text().strip():
+            save_secret("SERPAPI_KEY", self.serpapi.text().strip(), prefer="file")
+        if self.brave_key.text().strip():
+            save_secret("BRAVE_API_KEY", self.brave_key.text().strip(), prefer="file")
         save_secret("EMBED_BACKEND", self.embed_backend.currentText(), prefer="file")
         save_secret("LLM_BACKEND", self.llm_backend.currentText(), prefer="file")
         save_secret("OPENAI_CHAT_MODEL", self.openai_model.text().strip() or "gpt-4o-mini", prefer="file")
@@ -1374,7 +1543,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ask_worker = AskWorker(
             q, self.k_spin.value(), history=self.history,
             formula_mode=self.formula_cb.isChecked(),
-            agents_enabled=self.agents_cb.isChecked()
+            agents_enabled=self.agents_cb.isChecked(),
+            web_enabled=self.web_cb.isChecked()
         )
         self.ask_worker.progress.connect(lambda s: self.status.showMessage(s))
         self.ask_worker.progress_pct.connect(self.status_prog.setValue)

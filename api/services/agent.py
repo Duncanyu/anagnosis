@@ -1,5 +1,5 @@
-from typing import List, Dict, Any, Tuple
-import os, re, time
+from typing import List, Dict, Any, Tuple, Optional
+import os, re, time, json, pathlib
 
 try:
     from api.services import websearch
@@ -215,6 +215,84 @@ def _support_score(sent: str, cand: List[Tuple[str, str]]) -> Tuple[float, str]:
             best = s
             src = tag
     return best, src
+
+
+def _tokenize_simple(text: str) -> List[str]:
+    return [t for t in re.findall(r"[A-Za-z0-9_]+", (text or "").lower()) if len(t) > 2]
+
+
+_DOC_TOPIC_CACHE: List[set] | None = None
+
+
+def _load_doc_topics(limit_docs: int = 20) -> List[set]:
+    global _DOC_TOPIC_CACHE
+    if _DOC_TOPIC_CACHE is not None:
+        return _DOC_TOPIC_CACHE
+    topics: List[set] = []
+    path = pathlib.Path("artifacts") / "doc_summaries.jsonl"
+    if path.exists():
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    if len(topics) >= limit_docs:
+                        break
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    txt = " ".join(filter(None, [obj.get("file"), obj.get("summary")]))
+                    tokens = set(_tokenize_simple(txt))
+                    if tokens:
+                        topics.append(tokens)
+        except Exception:
+            topics = []
+    if not topics:
+        base = pathlib.Path("artifacts")
+        chunk_files = sorted(base.glob("chunks_*.jsonl"))
+        for fp in chunk_files:
+            seen = set()
+            try:
+                with fp.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        if len(topics) >= limit_docs:
+                            break
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            continue
+                        name = (obj.get("doc_name") or "").strip()
+                        if not name or name in seen:
+                            continue
+                        seen.add(name)
+                        tokens = set(_tokenize_simple(name))
+                        if tokens:
+                            topics.append(tokens)
+            except Exception:
+                continue
+    _DOC_TOPIC_CACHE = topics
+    return topics
+
+
+def estimate_relevance(question: str) -> Tuple[Optional[float], Dict[str, Any]]:
+    q_tokens = set(_tokenize_simple(question))
+    if not q_tokens:
+        return None, {"tokens": 0, "matched": 0}
+    topics = _load_doc_topics()
+    if not topics:
+        return None, {"tokens": len(q_tokens), "matched": 0}
+    best = 0.0
+    best_match = 0
+    for toks in topics:
+        if not toks:
+            continue
+        overlap = len(q_tokens & toks)
+        if overlap == 0:
+            continue
+        score = overlap / len(q_tokens)
+        if score > best:
+            best = score
+            best_match = overlap
+    return best, {"tokens": len(q_tokens), "matched": best_match}
 
 
 def _is_exercise_like(s: str) -> bool:

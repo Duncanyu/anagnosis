@@ -804,14 +804,25 @@ def _load_cross_encoder(tag):
         except Exception:
             pass
         from sentence_transformers import CrossEncoder
+
         model_map = {
             "minilm": "cross-encoder/ms-marco-MiniLM-L-6-v2",
             "bge-m3": "BAAI/bge-reranker-v2-m3",
             "bge-base": "BAAI/bge-reranker-base",
             "bge-large": "BAAI/bge-reranker-large",
         }
-        mname = model_map.get(tag, tag)
-        ce = CrossEncoder(mname, device="cpu")
+
+        local_tag = {"local", "sft", "custom"}
+        model_path = None
+        if tag in local_tag or tag == "local-sft":
+            model_path = os.getenv("RERANKER_LOCAL_PATH") or "artifacts/models/reranker_sft"
+            if not os.path.exists(model_path):
+                return None, None
+            mname = model_path
+        else:
+            mname = model_map.get(tag, tag)
+
+        ce = CrossEncoder(mname, device=os.getenv("RERANKER_DEVICE", "cpu"))
         return ce, mname
     except Exception:
         return None, None
