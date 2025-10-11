@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from typing import Iterable, List, Optional
 
+from api.core.config import load_config
+
 try:
     import torch
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -27,7 +29,20 @@ except Exception:  # pragma: no cover - optional dependency
 _MODEL = None
 _TOKENIZER = None
 _ID2LABEL: dict[int, str] = {}
-_INFO = {"loaded": False, "path": "", "device": "cpu"}
+_INFO = {"loaded": False, "path": "", "device": "cpu", "enabled": False}
+
+
+def _enabled() -> bool:
+    try:
+        cfg = load_config() or {}
+    except Exception:
+        cfg = {}
+    flag = cfg.get("CHUNK_SEMANTICS_ENABLED")
+    if flag is None:
+        flag = os.getenv("CHUNK_SEMANTICS_ENABLED") or os.getenv("CHUNK_SEMANTICS")
+    if flag is None:
+        return False
+    return str(flag).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _model_path() -> Path:
@@ -44,6 +59,9 @@ def semantics_info() -> dict:
 
 def _ensure_model():
     global _MODEL, _TOKENIZER, _ID2LABEL
+    if not _enabled():
+        _INFO.update({"enabled": False})
+        return None, None
     if _MODEL is not None:
         return _MODEL, _TOKENIZER
     if not _HAS_TORCH:
@@ -65,7 +83,7 @@ def _ensure_model():
         model.eval()
         _MODEL = model
         _TOKENIZER = tok
-        _INFO.update({"loaded": True, "path": str(path), "device": device})
+        _INFO.update({"loaded": True, "path": str(path), "device": device, "enabled": True})
         _ID2LABEL.clear()
         for k, v in getattr(model.config, "id2label", {}).items():
             try:
@@ -83,6 +101,8 @@ def _ensure_model():
 def classify_chunks(chunks: Iterable[dict], batch_size: int = 64, progress_cb=None) -> List[dict]:
     """Annotate chunks with semantic labels if the classifier is available."""
     chunks = list(chunks)
+    if not _enabled():
+        return chunks
     model, tokenizer = _ensure_model()
     if model is None or tokenizer is None or not chunks:
         return chunks

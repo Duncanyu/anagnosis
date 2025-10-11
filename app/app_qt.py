@@ -1,15 +1,42 @@
-import sys, pathlib, traceback, json, os, shutil, re, urllib.parse
-from collections import Counter
+import sys, pathlib, traceback, json, os, shutil, re, urllib.parse, time
 from PySide6 import QtWidgets, QtCore, QtGui
+os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+
+def _resolve_webengine_process() -> str | None:
+    try:
+        import PySide6  # noqa: F401
+    except Exception:
+        return None
+    base = pathlib.Path(PySide6.__file__).resolve().parent  # type: ignore[name-defined]
+    candidates = [
+        base / "Qt" / "libexec" / "QtWebEngineProcess",
+        base / "Qt" / "libexec" / "QtWebEngineProcess.app" / "Contents" / "MacOS" / "QtWebEngineProcess",
+    ]
+    helpers = base.glob("Qt/lib/QtWebEngineCore.framework/Versions/*/Helpers/QtWebEngineProcess.app/Contents/MacOS/QtWebEngineProcess")
+    candidates.extend(list(helpers))
+    for cand in candidates:
+        if cand.exists():
+            return str(cand)
+    return None
 
 try:
     from PySide6 import QtWebEngineWidgets
+    proc_path = _resolve_webengine_process()
+    if proc_path:
+        os.environ.setdefault("QTWEBENGINEPROCESS_PATH", proc_path)
+        print(f"[QtWebEngine] process path: {proc_path}", flush=True)
+    else:
+        print("[QtWebEngine] process path not found; relying on defaults", flush=True)
 except Exception:
     QtWebEngineWidgets = None
+    os.environ["UI_USE_WEBENGINE"] = "false"
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+if "UI_USE_WEBENGINE" not in os.environ:
+    os.environ["UI_USE_WEBENGINE"] = "true"
 
 def load_icon(name: str, fallback: QtGui.QIcon | None = None) -> QtGui.QIcon:
     try:
@@ -36,19 +63,19 @@ try:
 except Exception:
     mdlib = None
 
-from api.services.parse import parse_any_bytes
-from api.services.chunk import chunk_pages
-from api.services.index import add_chunks, search, clear_index
-from api.services.summarize import summarize, summarize_document, summarizer_info, summarize_batched, summarize_all_formulas, is_formula_query
+from api.services.index import clear_index
 from api.services import agent
-from api.services.embed import embedding_info
 from api.services import memory as mem
 from api.services import aliases
+from api.services import pipeline
+from api.services.pipeline import PipelineCancelled
 from api.core.config import save_secret, present_keys, load_config
 
 
 APP_TITLE = "ANAGNOSIS"
 PREFS_PATH = pathlib.Path("artifacts") / "ui_prefs.json"
+WEBENGINE_CACHE = pathlib.Path("artifacts") / "qtwebengine"
+WEBENGINE_READY_FLAG = WEBENGINE_CACHE / "ready.flag"
 
 def as_bool(x):
     s = str(x).strip().lower()
@@ -123,95 +150,17 @@ class IngestWorker(QtCore.QThread):
             pass
         self.progress.emit(s)
 
-    def _check_cancel(self):
-        if self.isInterruptionRequested():
-            raise RuntimeError("Cancelled")
-
     def run(self):
         try:
-            self._check_cancel()
-            summaries, details, total_chunks = [], [], 0
-            emb = embedding_info(); self.progress.emit(f"Embedding: {emb['backend']} ({emb['model']})")
-            sumi = summarizer_info(); self.progress.emit(f"Summarizer: {sumi['backend']}")
-            for p in self.paths:
-                self._check_cancel()
-                self.progress.emit(f"Loading {p.name}…")
-                self.progress_pct.emit(2)
-                data = p.read_bytes()
-
-                self.progress.emit("Parsing document…")
-                parsed = parse_any_bytes(p.name, data, progress_cb=self.progress.emit)
-                self._check_cancel()
-                self.progress_pct.emit(15)
-
-                ocr_list = parsed.get("ocr_page_numbers") or []
-                suspect_list = parsed.get("suspect_pages") or []
-                if ocr_list:
-                    head = ", ".join(str(x) for x in ocr_list[:20])
-                    tail = " ..." if len(ocr_list) > 20 else ""
-                    self._log(f"OCR pages: [{head}]{tail}")
-                else:
-                    self._log("OCR pages: []")
-                if suspect_list:
-                    head = ", ".join(str(x) for x in suspect_list[:20])
-                    tail = " ..." if len(suspect_list) > 20 else ""
-                    self._log(f"Suspect pages: [{head}]{tail}")
-                else:
-                    self._log("Suspect pages: []")
-                    
-                salv_list = parsed.get("salvaged_pages") or []
-
-                if salv_list:
-                    head = ", ".join(str(x) for x in salv_list[:20])
-                    tail = " ..." if len(salv_list) > 20 else ""
-                    self._log(f"Salvaged pages: [{head}]{tail}")
-                else:
-                    self._log("Salvaged pages: []")
-
-                for page in parsed["pages"]:
-                    page["doc_name"] = p.name
-
-                self._check_cancel()
-                self.progress.emit("Chunking…")
-                self._check_cancel()
-                chunks = chunk_pages(parsed["pages"])
-                self._check_cancel()
-                self.progress_pct.emit(35)
-
-                def embed_cb(done, total):
-                    if self.isInterruptionRequested():
-                        raise RuntimeError("Cancelled")
-                    base = 35
-                    span = 55
-                    pct = base + int(span * (done / max(1, total)))
-                    pct = min(95, max(36, pct))
-                    self.progress_pct.emit(pct)
-
-                self.progress.emit("Embedding and indexing…")
-                self._check_cancel()
-                add_chunks(chunks, progress_cb=embed_cb)
-                self._check_cancel()
-                self.progress_pct.emit(96)
-
-                total_chunks += len(chunks)
-
-                self.progress.emit("Summarizing…")
-                self._check_cancel()
-                docsum = summarize_document(chunks)
-                self.progress_pct.emit(100)
-
-                summaries.append(f"## {p.name}\n\n{docsum['summary']}")
-                details.append({
-                    "file": str(p),
-                    "num_pages": parsed["num_pages"],
-                    "ocr_pages": parsed["ocr_pages"],
-                    "ocr_page_numbers": ocr_list,
-                    "suspect_pages": suspect_list,
-                    "num_chunks": len(chunks)
-                })
-
-            combined = "\n\n".join(summaries) if summaries else "No documents ingested."
-            self.finished.emit({"details": details, "num_docs": len(self.paths), "num_chunks": total_chunks, "doc_summary": combined})
+            result = pipeline.ingest_documents(
+                self.paths,
+                progress=self._log,
+                progress_pct=self.progress_pct.emit,
+                should_cancel=self.isInterruptionRequested,
+            )
+            self.finished.emit(result)
+        except PipelineCancelled:
+            self.failed.emit("Cancelled")
         except Exception as e:
             tb = traceback.format_exc()
             self.failed.emit(f"{e}\n{tb}")
@@ -231,301 +180,22 @@ class AskWorker(QtCore.QThread):
         self.agents_enabled = agents_enabled
         self.web_enabled = web_enabled
 
-    def _check_cancel(self):
-        if self.isInterruptionRequested():
-            raise RuntimeError("Cancelled")
-
-    def _token_overlap(self, q_text, chunk_text):
-        qtoks = [t for t in re.findall(r"[A-Za-z0-9_]+", (q_text or "").lower()) if len(t) > 2]
-        if not qtoks:
-            return 0.0
-        ctoks = [t for t in re.findall(r"[A-Za-z0-9_]+", (chunk_text or "").lower()) if len(t) > 2]
-        if not ctoks:
-            return 0.0
-        cset = Counter(ctoks)
-        shared = sum(1 for t in qtoks if cset.get(t, 0) > 0)
-        return shared / max(1, len(qtoks))
-
     def run(self):
         try:
-            self._check_cancel()
-            base_prefix = (
-                "Write normal text and structure in Markdown. "
-                "Typeset ALL mathematical expressions in LaTeX: use $...$ for inline and $$...$$ for display. "
-                "Do NOT wrap plain prose in \\text{...}. "
-                "Use standard LaTeX commands (\\frac, \\sqrt, ^, _). "
-                "Preserve citations as plain text.\n"
+            result = pipeline.answer_question(
+                self.question,
+                k=self.k,
+                history=self.history,
+                formula_mode=self.formula_mode,
+                agents_enabled=self.agents_enabled,
+                web_enabled=self.web_enabled,
+                progress=self.progress.emit,
+                progress_pct=self.progress_pct.emit,
+                should_cancel=self.isInterruptionRequested,
             )
-            if self.formula_mode:
-                fmt_prefix = (
-                    base_prefix +
-                    "\nWhen listing formulas, format EACH item on ONE line exactly as: "
-                    "<label/meaning> — $$ <LaTeX formula> $$ [FileName.pdf p.N] — <1–2 sentence explanation>. "
-                    "Put the citation AFTER the formula (not inside the math). "
-                    "Do not use bullets. Do not place citations or explanation inside $...$ or $$...$$. Keep explanations concise and factual.\n\n"
-                )
-            else:
-                fmt_prefix = base_prefix + "\n"
-            fmt_q = fmt_prefix + self.question
-
-            history = list(self.history or [])
-            q_lower = (self.question or "").strip().lower()
-            if history:
-                last = history[-1]
-                if re.search(r"what\s+(?:was|is)\s+(?:my|the)\s+(?:last|previous)\s+question", q_lower):
-                    prev_q = last.get("q") or "(unknown)"
-                    text = f"Your previous question was:\n\n> {prev_q}"
-                    self.finished.emit({"answer": text, "citations": [], "quotes": []})
-                    return
-                if re.search(r"what\s+(?:was|is)\s+(?:your|the)\s+(?:last|previous)\s+answer", q_lower) or re.search(r"repeat\s+your\s+(?:last|previous)\s+answer", q_lower):
-                    prev_a = last.get("a") or "(no recent answer recorded)"
-                    text = "Here is my previous answer:\n\n" + prev_a
-                    self.finished.emit({"answer": text, "citations": [], "quotes": []})
-                    return
-
-            tb_base = int(os.environ.get("ASK_TIME_BUDGET_SEC","120"))
-            tb = int(os.environ.get("ASK_TIME_BUDGET_SEC_FORMULA","240")) if self.formula_mode else tb_base
-            web_chunks = []
-            web_hits = []
-            max_web_overlap = 0.0
-            provider_cfg = {}
-            try:
-                provider_cfg = load_config() or {}
-            except Exception:
-                provider_cfg = {}
-            provider_label = provider_cfg.get("WEB_SEARCH_PROVIDER") or os.environ.get("WEB_SEARCH_PROVIDER") or "duckduckgo"
-            if self.web_enabled:
-                self.progress.emit(f"Web search ({provider_label})…")
-                try:
-                    from api.services import websearch
-                    web_results = websearch.search_web(self.question, max_results=6)
-                except Exception:
-                    web_results = []
-                if web_results:
-                    self.progress.emit(f"Web results: {len(web_results)}")
-                else:
-                    self.progress.emit("Web search returned no results.")
-                from urllib.parse import urlparse
-                for res in web_results:
-                    snippet = (res.get("snippet") or "").strip()
-                    title = (res.get("title") or "").strip()
-                    if not snippet and not title:
-                        continue
-                    text = (title + "\n" + snippet).strip()
-                    url = res.get("url") or ""
-                    host = urlparse(url).netloc or (res.get("source") or "web")
-                    chunk = {
-                        "text": text,
-                        "doc_name": f"Web:{host}",
-                        "page_start": 1,
-                        "page_end": 1,
-                        "section_tag": "web",
-                        "web_url": url,
-                        "is_web": True,
-                        "_score": 0.85,
-                    }
-                    max_web_overlap = max(max_web_overlap, self._token_overlap(self.question, text))
-                    web_chunks.append(chunk)
-                    web_hits.append((0.85, chunk))
-
-            doc_reference = bool(re.search(r"(textbook|chapter|section|lecture|notes|\.(pdf|docx))", self.question.lower()))
-
-            rel_score, rel_meta = agent.estimate_relevance(self.question)
-            relevance_threshold = float(os.getenv("ASK_RAG_MIN_RELEVANCE", "0.20"))
-            self.progress.emit(f"Relevance score: {rel_score if rel_score is not None else 'n/a'}")
-
-            use_rag = not self.web_enabled
-            if self.web_enabled:
-                if not web_chunks:
-                    use_rag = True
-                elif doc_reference:
-                    use_rag = True
-                else:
-                    overlap_threshold = float(os.getenv("ASK_WEB_MIN_OVERLAP", "0.45"))
-                    use_rag = max_web_overlap < overlap_threshold
-            if rel_score is not None and rel_score < relevance_threshold and not doc_reference:
-                use_rag = False
-
-            hits = []
-            base_chunks = []
-            rag_scores = []
-            rag_chunks = []
-            mem_chunks = []
-            history = list(self.history or [])
-
-            if use_rag:
-                base_pool = int(os.environ.get("ASK_CANDIDATES","300"))
-                pool = int(os.environ.get("ASK_CANDIDATES_FORMULA","3000")) if self.formula_mode else base_pool
-                self._pc = 12
-
-                def s_cb(msg):
-                    self.progress.emit(msg)
-                    self._pc = min(55, self._pc + 3)
-                    self.progress_pct.emit(self._pc)
-
-                st_base = max(10, min(tb_base//2, 30))
-                st = int(os.environ.get("SEARCH_TIMEOUT_SEC", str(st_base)))
-                if self.formula_mode:
-                    st = int(os.environ.get("SEARCH_TIMEOUT_SEC_FORMULA", str(max(20, min(tb//2, 60)))))
-
-                self._check_cancel()
-                self.progress.emit("Searching index…")
-                hits = search(self.question, k=pool, progress_cb=s_cb, timeout_sec=st, pool=pool)
-                self._check_cancel()
-                self.progress.emit(f"Hits: {len(hits)}")
-                base_chunks = [h[1] for h in hits]
-                rag_scores = [float(h[0]) for h in hits]
-                for sc, ch in hits[: self.k]:
-                    x = dict(ch)
-                    x["_score"] = float(sc)
-                    rag_chunks.append(x)
-                if not hits and not web_chunks:
-                    self.progress_pct.emit(100)
-                    self.finished.emit({"answer": "**No local results. Try web search.**", "citations": []})
-                    return
-            else:
-                self.progress.emit("Using web results only…")
-                if not web_chunks:
-                    self.progress_pct.emit(100)
-                    self.finished.emit({"answer": "**No web results found for this question.**", "citations": [], "quotes": []})
-                    return
-
-            rag_threshold = float(os.getenv("ASK_WEB_MIN_RAG", "0.35"))
-
-            if self.web_enabled and web_chunks:
-                if use_rag and rag_scores and rag_scores[0] >= rag_threshold:
-                    top_chunks = list(web_chunks) + rag_chunks
-                elif use_rag and rag_chunks:
-                    top_chunks = list(web_chunks) + rag_chunks
-                else:
-                    top_chunks = list(web_chunks)
-            else:
-                top_chunks = rag_chunks
-
-            if history:
-                for idx, turn in enumerate(history[-3:], 1):
-                    q_prev = (turn.get("q") or "").strip()
-                    a_prev = (turn.get("a") or "").strip()
-                    if not q_prev and not a_prev:
-                        continue
-                    parts = []
-                    if q_prev:
-                        parts.append(f"Prev question: {q_prev}")
-                    if a_prev:
-                        parts.append(f"Prev answer: {a_prev}")
-                    text_mem = "\n".join(parts)
-                    if not text_mem:
-                        continue
-                    mem_chunks.append({
-                        "text": text_mem,
-                        "doc_name": "Conversation memory",
-                        "page_start": idx,
-                        "page_end": idx,
-                        "section_tag": "memory",
-                        "is_memory": True,
-                        "_score": 0.55,
-                    })
-            if mem_chunks:
-                top_chunks.extend(mem_chunks)
-
-            if self.web_enabled and web_chunks and not use_rag:
-                combined_hits = list(web_hits) if web_hits else [(0.0, c) for c in web_chunks]
-            else:
-                combined_hits = list(hits) + (web_hits if web_hits else [(0.85, c) for c in web_chunks])
-            if mem_chunks:
-                combined_hits.extend([(0.55, ch) for ch in mem_chunks])
-
-            if self.formula_mode:
-                self._check_cancel()
-                self.progress.emit("Formula mode: extracting all formulas in scope…")
-                total = len(top_chunks)
-                if total < pool:
-                    self.progress.emit(f"Warning: only {total} / {pool} chunks returned; consider increasing index size or candidate pool.")
-                def p_cb(msg):
-                    if self.isInterruptionRequested():
-                        raise RuntimeError("Cancelled")
-                    self.progress.emit(msg)
-                    m = re.search(r"(\d+)\s*/\s*(\d+)", msg)
-                    if m:
-                        done = int(m.group(1))
-                        pct = 20 + int(70 * (done / max(1, total)))
-                        pct = max(20, min(95, pct))
-                        self.progress_pct.emit(pct)
-                out = summarize_all_formulas(fmt_q, top_chunks, progress_cb=p_cb)
-                if self.agents_enabled:
-                    self._check_cancel()
-                    try:
-                        self.progress.emit("Agents: verifying…")
-                        agent_budget = int(os.environ.get("AGENT_VERIFY_BUDGET", "30"))
-                        _prev = out if isinstance(out, dict) else {"answer": str(out)}
-                        _res = agent.verify_answer(self.question, out, combined_hits, time_budget_sec=agent_budget)
-                        changed = False
-                        try:
-                            changed = (_res.get("answer", "") != _prev.get("answer", ""))
-                        except Exception:
-                            changed = False
-                        if isinstance(_res, dict):
-                            meta = _res.get("agent_meta", {})
-                            meta.update({"enabled": True, "changed": bool(changed)})
-                            _res["agent_meta"] = meta
-                        out = _res
-                        self.progress.emit("Agents: verdict — " + ("modified" if changed else "validated"))
-                    except Exception:
-                        self.progress.emit("Agent verification skipped (error).")
-                    self._check_cancel()
-            else:
-                self._check_cancel()
-                self.progress.emit("Summarizing with context…")
-                self.progress_pct.emit(60)
-                mb = int(os.environ.get("ASK_MAX_BATCHES","6"))
-                exh = os.environ.get("ASK_EXHAUSTIVE","false").lower() in {"1","true","yes","on"}
-                chs = list(top_chunks)
-                self._check_cancel()
-                out = summarize_batched(fmt_q, chs, history=self.history, progress_cb=lambda s: self.progress.emit(s), max_batches=mb, time_budget_sec=tb, exhaustive=exh)
-                if self.agents_enabled:
-                    self._check_cancel()
-                    try:
-                        self.progress.emit("Agents: verifying…")
-                        agent_budget = int(os.environ.get("AGENT_VERIFY_BUDGET", "30"))
-                        _prev = out if isinstance(out, dict) else {"answer": str(out)}
-                        _res = agent.verify_answer(self.question, out, combined_hits, time_budget_sec=agent_budget)
-                        changed = False
-                        try:
-                            changed = (_res.get("answer", "") != _prev.get("answer", ""))
-                        except Exception:
-                            changed = False
-                        if isinstance(_res, dict):
-                            meta = _res.get("agent_meta", {})
-                            meta.update({"enabled": True, "changed": bool(changed)})
-                            _res["agent_meta"] = meta
-                        out = _res
-                        self.progress.emit("Agents: verdict — " + ("modified" if changed else "validated"))
-                    except Exception:
-                        self.progress.emit("Agent verification skipped (error).")
-                    self._check_cancel()
-
-            try:
-                if isinstance(out, dict) and "citations" in out:
-                    out["citations"] = sorted(set(out.get("citations", [])))
-            except Exception:
-                pass
-
-            self.progress_pct.emit(100)
-            if isinstance(out, dict) and self.web_enabled and web_chunks:
-                try:
-                    rep = out.get("agent_report") or ""
-                    if rep and "Web evidence" not in rep:
-                        links = []
-                        for ch in web_chunks[:3]:
-                            url = ch.get("web_url")
-                            if url:
-                                links.append(f"- {url}")
-                        if links:
-                            extra = "\n\n**Web sources**\n" + "\n".join(links)
-                            out["answer"] = (out.get("answer") or "") + extra
-                except Exception:
-                    pass
-            self.finished.emit(out)
+            self.finished.emit(result)
+        except PipelineCancelled:
+            self.failed.emit("Cancelled")
         except Exception as e:
             tb = traceback.format_exc()
             self.failed.emit(f"{e}\n{tb}")
@@ -646,6 +316,18 @@ class SettingsDialog(QtWidgets.QDialog):
         limits_form.addRow("", btn_clear_index)
         tabs.addTab(limits_w, "Budgets")
 
+        interface_w = QtWidgets.QWidget()
+        interface_form = QtWidgets.QFormLayout(interface_w)
+        self.webengine_cb = QtWidgets.QCheckBox("Use rich answer renderer (MathJax)")
+        default_web = as_bool(prefs.get("UI_USE_WEBENGINE", os.environ.get("UI_USE_WEBENGINE", "true")))
+        allow_web = QtWebEngineWidgets is not None
+        self.webengine_cb.setChecked(bool(default_web and allow_web))
+        self.webengine_cb.setEnabled(allow_web)
+        hint = "Requires QtWebEngine; disable if the app restarts when answers render."
+        self.webengine_cb.setToolTip(hint)
+        interface_form.addRow("Answer view", self.webengine_cb)
+        tabs.addTab(interface_w, "Interface")
+
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.save)
         buttons.rejected.connect(self.reject)
@@ -728,6 +410,7 @@ class SettingsDialog(QtWidgets.QDialog):
         prefs["OPENAI_RPM"] = int(self.openai_rpm.value())
         prefs["ASK_BATCH_CHAR_BUDGET"] = int(self.ask_batch_chars.value())
         prefs["ASK_MAX_BATCHES"] = int(self.ask_max_batches.value())
+        prefs["UI_USE_WEBENGINE"] = "true" if (QtWebEngineWidgets is not None and self.webengine_cb.isChecked()) else "false"
         write_prefs(prefs)
         os.environ["MEMORY_ENABLED"] = prefs["MEMORY_ENABLED"]
         os.environ["MEMORY_TOKEN_LIMIT"] = str(prefs["MEMORY_TOKEN_LIMIT"])
@@ -738,6 +421,7 @@ class SettingsDialog(QtWidgets.QDialog):
         os.environ["OPENAI_RPM"] = str(prefs["OPENAI_RPM"])
         os.environ["ASK_BATCH_CHAR_BUDGET"] = str(prefs["ASK_BATCH_CHAR_BUDGET"])
         os.environ["ASK_MAX_BATCHES"] = str(prefs["ASK_MAX_BATCHES"])
+        os.environ["UI_USE_WEBENGINE"] = prefs["UI_USE_WEBENGINE"]
         self.accept()
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -755,6 +439,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.memory_file_limit_mb = int(prefs.get("MEMORY_FILE_LIMIT_MB", os.environ.get("MEMORY_FILE_LIMIT_MB", cfg.get("MEMORY_FILE_LIMIT_MB") or 50)))
         self.history = mem.load_recent(self.memory_token_limit) if self.memory_enabled else []
         self.history_limit = 1000
+        default_web_pref = os.environ.get("UI_USE_WEBENGINE", "true")
+        self.use_webengine = QtWebEngineWidgets is not None and as_bool(
+            prefs.get("UI_USE_WEBENGINE", default_web_pref)
+        )
+        os.environ["UI_USE_WEBENGINE"] = "true" if (self.use_webengine and QtWebEngineWidgets is not None) else "false"
 
         tb = self.addToolBar("Main")
         brand = QtWidgets.QWidget()
@@ -990,16 +679,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.answer_stack.addWidget(self.answer)
 
         self.answer_web = None
-        if QtWebEngineWidgets is not None:
-            self.answer_web = QtWebEngineWidgets.QWebEngineView()
-            try:
-                self.answer_web.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
-                self.answer_web.setStyleSheet("background: transparent")
-                if hasattr(self.answer_web, "page"):
-                    self.answer_web.page().setBackgroundColor(QtCore.Qt.transparent)
-            except Exception:
-                pass
-            self.answer_stack.addWidget(self.answer_web)
+        self._last_answer_md = ""
+        self._init_answer_renderer()
 
         header = QtWidgets.QWidget()
         header_v = QtWidgets.QVBoxLayout(header)
@@ -1154,33 +835,84 @@ class MainWindow(QtWidgets.QMainWindow):
         return f"<!doctype html><html><head><meta charset='utf-8'>{css}{mathjax}</head><body class='mjx-process'>{inner_html}</body></html>"
 
 
+    def _init_answer_renderer(self):
+        if not hasattr(self, "answer_stack"):
+            return
+        if self.answer_web is not None and (not self.use_webengine or QtWebEngineWidgets is None):
+            idx = self.answer_stack.indexOf(self.answer_web)
+            if idx != -1:
+                widget = self.answer_stack.widget(idx)
+                self.answer_stack.removeWidget(widget)
+            try:
+                self.answer_web.deleteLater()
+            except Exception:
+                pass
+            self.answer_web = None
+        if self.use_webengine and QtWebEngineWidgets is not None and self.answer_web is None:
+            try:
+                view = QtWebEngineWidgets.QWebEngineView()
+                view.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+                view.setStyleSheet("background: transparent")
+                try:
+                    WEBENGINE_CACHE.mkdir(parents=True, exist_ok=True)
+                    profile = QtWebEngineWidgets.QWebEngineProfile.defaultProfile()
+                    profile.setCachePath(str(WEBENGINE_CACHE / "cache"))
+                    profile.setPersistentStoragePath(str(WEBENGINE_CACHE / "storage"))
+                    profile.setHttpCacheType(QtWebEngineWidgets.QWebEngineProfile.MemoryHttpCache)
+                except Exception:
+                    pass
+                if hasattr(view, "page"):
+                    view.page().setBackgroundColor(QtCore.Qt.transparent)
+                if hasattr(view, "settings"):
+                    try:
+                        s = view.settings()
+                        s.setAttribute(QtWebEngineWidgets.QWebEngineSettings.Accelerated2dCanvasEnabled, False)
+                        s.setAttribute(QtWebEngineWidgets.QWebEngineSettings.WebGLEnabled, False)
+                        s.setAttribute(QtWebEngineWidgets.QWebEngineSettings.JavascriptEnabled, True)
+                    except Exception:
+                        pass
+                self.answer_web = view
+                self.answer_stack.addWidget(self.answer_web)
+            except Exception:
+                self.answer_web = None
+                self.use_webengine = False
+                os.environ["UI_USE_WEBENGINE"] = "false"
+
     def render_answer(self, md_text):
         if md_text is None:
             md_text = ""
-        if QtWebEngineWidgets is not None and self.answer_web is not None:
+        self._last_answer_md = md_text
+        if self.use_webengine and QtWebEngineWidgets is not None and self.answer_web is not None:
             try:
+                text = md_text
                 if self.formula_cb.isChecked():
-                    md_text = self._decorate_formula_items(md_text)
+                    try:
+                        text = self._decorate_formula_items(text)
+                    except Exception:
+                        pass
+                if mdlib:
+                    inner = mdlib.markdown(text, extensions=["fenced_code", "tables", "toc"])
+                else:
+                    import html
+                    inner = "<pre>" + html.escape(text) + "</pre>"
+                html_doc = self._build_md_math_html(inner)
+                self.answer_web.setHtml(html_doc)
+                try:
+                    f = self.font()
+                    if hasattr(self.answer_web, "settings"):
+                        s = self.answer_web.settings()
+                        s.setFontSize(s.FontSizeDefault, f.pointSize() if f.pointSize() > 0 else 13)
+                except Exception:
+                    pass
+                self.answer_stack.setCurrentWidget(self.answer_web)
+                return
             except Exception:
-                pass
-            if mdlib:
-                inner = mdlib.markdown(md_text, extensions=["fenced_code", "tables", "toc"])
-            else:
-                import html
-                inner = "<pre>" + html.escape(md_text) + "</pre>"
-            html = self._build_md_math_html(inner)
-            self.answer_web.setHtml(html)
-            try:
-                f = self.font()
-                if hasattr(self.answer_web, "settings"):
-                    s = self.answer_web.settings()
-                    s.setFontSize(s.FontSizeDefault, f.pointSize() if f.pointSize() > 0 else 13)
-            except Exception:
-                pass
-            self.answer_stack.setCurrentWidget(self.answer_web)
-        else:
-            render_markdown(self.answer, md_text)
-            self.answer_stack.setCurrentWidget(self.answer)
+                # Fall back to plain renderer if WebEngine misbehaves mid-demo
+                self.use_webengine = False
+                os.environ["UI_USE_WEBENGINE"] = "false"
+                self._init_answer_renderer()
+        render_markdown(self.answer, md_text)
+        self.answer_stack.setCurrentWidget(self.answer)
 
     def _apply_tab_style(self):
         pal = self.palette()
@@ -1397,6 +1129,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.memory_token_limit = int(prefs.get("MEMORY_TOKEN_LIMIT", os.environ.get("MEMORY_TOKEN_LIMIT", cfg.get("MEMORY_TOKEN_LIMIT") or 1200)))
             self.memory_file_limit_mb = int(prefs.get("MEMORY_FILE_LIMIT_MB", os.environ.get("MEMORY_FILE_LIMIT_MB", cfg.get("MEMORY_FILE_LIMIT_MB") or 50)))
             self.history = mem.load_recent(self.memory_token_limit) if self.memory_enabled else []
+            prev_web = self.use_webengine
+            self.use_webengine = QtWebEngineWidgets is not None and as_bool(
+                prefs.get("UI_USE_WEBENGINE", os.environ.get("UI_USE_WEBENGINE", "true"))
+            )
+            os.environ["UI_USE_WEBENGINE"] = "true" if self.use_webengine else "false"
+            if self.use_webengine != prev_web:
+                self._init_answer_renderer()
+                self.render_answer(getattr(self, "_last_answer_md", ""))
             self.update_key_status()
 
     def _persist_quick_prefs(self):
@@ -1462,7 +1202,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def ingest_docs(self):
         if not self.selected_paths:
             return
+        if self.ingest_worker and self.ingest_worker.isRunning():
+            self.status.showMessage("Ingest already running")
+            return
         self.ingest_log.clear()
+        self.ingest_btn.setEnabled(False)
+        self.pick_btn.setEnabled(False)
         self.status_prog.show()
         self.status_prog.setValue(0)
         self.cancel_btn.show()
@@ -1520,6 +1265,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cancel_btn.hide()
 
     def run_ask(self):
+        if self.ask_worker and self.ask_worker.isRunning():
+            self.status.showMessage("Already answering — cancel or wait to ask again")
+            return
         q = self.q_edit.toPlainText().strip()
         if not q:
             QtWidgets.QMessageBox.information(self, "Ask", "Type a question first.")
@@ -1672,8 +1420,28 @@ class MainWindow(QtWidgets.QMainWindow):
         write_prefs(prefs)
 
 def main():
+    os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+    try:
+        QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_ShareOpenGLContexts, True)
+    except Exception:
+        pass
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
     app = QtWidgets.QApplication(sys.argv)
+    restarted = os.environ.get("ANAGNOSIS_WEBENGINE_RESTARTED", "0") == "1"
+    if QtWebEngineWidgets is not None:
+        need_restart = not WEBENGINE_READY_FLAG.exists() and not restarted
+        if need_restart:
+            warm_up_webengine(app)
+            try:
+                WEBENGINE_READY_FLAG.parent.mkdir(parents=True, exist_ok=True)
+                WEBENGINE_READY_FLAG.write_text(str(time.time()), encoding="utf-8")
+            except Exception:
+                pass
+            print("[QtWebEngine] first-run warmup complete; restarting to finalize initialization", flush=True)
+            os.environ["ANAGNOSIS_WEBENGINE_RESTARTED"] = "1"
+            app.quit()
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+    warm_up_webengine(app)
     app.setApplicationName(APP_TITLE)
     app_icon = load_icon('icon') or load_icon('icon.png')
     if not app_icon.isNull():
@@ -1681,6 +1449,44 @@ def main():
     w = MainWindow()
     w.show()
     sys.exit(app.exec())
+
+def warm_up_webengine(app):
+    if QtWebEngineWidgets is None:
+        return
+    try:
+        prefs = read_prefs()
+    except Exception:
+        prefs = {}
+    if os.environ.get("ANAGNOSIS_WEBENGINE_WARMED", "0") == "1":
+        return
+    if prefs.get("UI_WEBENGINE_WARMED") == "true":
+        os.environ["ANAGNOSIS_WEBENGINE_WARMED"] = "1"
+        return
+    dummy = None
+    print("[QtWebEngine] warm-up start", flush=True)
+    dummy = None
+    try:
+        dummy = QtWebEngineWidgets.QWebEngineView()
+        dummy.setAttribute(QtCore.Qt.WA_DontShowOnScreen, True)
+        dummy.resize(1, 1)
+        dummy.setHtml("<html><head><meta charset='utf-8'></head><body></body></html>")
+        t_end = time.time() + 1.5
+        while time.time() < t_end:
+            app.processEvents(QtCore.QEventLoop.AllEvents, 50)
+            if not dummy.isLoading():
+                break
+        dummy.deleteLater()
+        prefs["UI_WEBENGINE_WARMED"] = "true"
+        write_prefs(prefs)
+        os.environ["ANAGNOSIS_WEBENGINE_WARMED"] = "1"
+        print("[QtWebEngine] warm-up succeeded", flush=True)
+    except Exception:
+        if dummy is not None:
+            try:
+                dummy.deleteLater()
+            except Exception:
+                pass
+        print("[QtWebEngine] warm-up failed", flush=True)
 
 if __name__ == "__main__":
     main()
