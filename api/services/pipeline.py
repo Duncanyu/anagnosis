@@ -19,6 +19,7 @@ from api.services.summarize import (
 )
 from api.services.embed import embedding_info
 from api.services import agent
+from api.services import memory as mem
 from api.services import websearch
 from api.core.config import load_config
 
@@ -183,6 +184,7 @@ def answer_question(
     progress: ProgressFn = None,
     progress_pct: PctFn = None,
     should_cancel: CancelFn = None,
+    only_doc: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the question-answering pipeline synchronously."""
 
@@ -279,6 +281,9 @@ def answer_question(
     relevance_threshold = float(os.getenv("ASK_RAG_MIN_RELEVANCE", "0.20"))
     _emit(progress, f"Relevance score: {rel_score if rel_score is not None else 'n/a'}")
 
+    # Default: always use local RAG when web search is OFF. This avoids
+    # over-pruning questions like "What is calculus" that are general but
+    # still benefit from local textbooks.
     use_rag = not web_enabled
     if web_enabled:
         if not web_chunks:
@@ -288,7 +293,9 @@ def answer_question(
         else:
             overlap_threshold = float(os.getenv("ASK_WEB_MIN_OVERLAP", "0.45"))
             use_rag = max_web_overlap < overlap_threshold
-    if rel_score is not None and rel_score < relevance_threshold and not doc_reference:
+    # Do not disable RAG purely based on the heuristic relevance score when
+    # web search is off; keep RAG on to maximize useful local hits.
+    if web_enabled and rel_score is not None and rel_score < relevance_threshold and not doc_reference:
         use_rag = False
 
     hits: List[Any] = []
@@ -313,7 +320,10 @@ def answer_question(
 
         _check_cancel(should_cancel)
         _emit(progress, "Searching index…")
-        hits = search(question, k=pool, progress_cb=s_cb, timeout_sec=st, pool=pool)
+        hits = search(question, k=pool, progress_cb=s_cb, timeout_sec=st, pool=pool, only_doc=only_doc)
+        if only_doc and not hits:
+            _emit(progress, "No hits in selected document; expanding to all documents…")
+            hits = search(question, k=pool, progress_cb=s_cb, timeout_sec=st, pool=pool)
         _check_cancel(should_cancel)
         _emit(progress, f"Hits: {len(hits)}")
         rag_scores = [float(h[0]) for h in hits]
@@ -342,8 +352,9 @@ def answer_question(
     else:
         top_chunks = rag_chunks
 
+    # In-session memory (recent turns from current chat) — keep a longer window
     if history:
-        for idx, turn in enumerate(history[-3:], 1):
+        for idx, turn in enumerate(history[-16:], 1):
             q_prev = (turn.get("q") or "").strip()
             a_prev = (turn.get("a") or "").strip()
             if not q_prev and not a_prev:
@@ -367,6 +378,50 @@ def answer_question(
                     "_score": 0.55,
                 }
             )
+
+    # Cross-conversation memory from memory.jsonl (always enabled)
+    try:
+        limit = int(os.getenv("MEMORY_TOKEN_LIMIT", "1200"))
+        recent = mem.load_recent(limit_tokens=limit) or []
+        # Deduplicate against current in-session history
+        hist_set = {
+            ((t.get("q") or "").strip(), (t.get("a") or "").strip())
+            for t in (history or [])
+        }
+        cross = []
+        for t in recent:
+            pair = ((t.get("q") or "").strip(), (t.get("a") or "").strip())
+            if not pair[0] and not pair[1]:
+                continue
+            if pair in hist_set:
+                continue
+            cross.append(t)
+        # Keep a modest number to avoid flooding context
+        for j, turn in enumerate(cross[-8:], 1):
+            q_prev = (turn.get("q") or "").strip()
+            a_prev = (turn.get("a") or "").strip()
+            parts = []
+            if q_prev:
+                parts.append(f"Prev question: {q_prev}")
+            if a_prev:
+                parts.append(f"Prev answer: {a_prev}")
+            text_mem = "\n".join(parts)
+            if not text_mem:
+                continue
+            mem_chunks.append(
+                {
+                    "text": text_mem,
+                    "doc_name": "Long‑term memory",
+                    "page_start": j,
+                    "page_end": j,
+                    "section_tag": "memory",
+                    "is_memory": True,
+                    "_score": 0.50,
+                }
+            )
+    except Exception:
+        # Memory is best-effort; ignore failures
+        pass
     if mem_chunks:
         top_chunks.extend(mem_chunks)
 
