@@ -175,15 +175,8 @@ body::before{
 .chat-controls summary{ display:none; cursor:pointer; list-style:none; }
 .chat-controls summary::-webkit-details-marker{ display:none; }
 
-/* Screen reader utility */
 .sr-only{ position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
 
-/* Scroll-to-bottom button */
-#scroll-down{ position:fixed; left:50%; transform:translateX(-50%); bottom:calc(var(--footer-h, 120px) + 16px); display:none; align-items:center; justify-content:center; width:34px; height:34px; border-radius:999px; border:1px solid var(--accent-border-strong); background:var(--primary); color:#fff; box-shadow:0 12px 28px -14px rgba(15,23,42,0.45); cursor:pointer; z-index:2000; opacity:0.98 }
-#scroll-down.show{ display:inline-flex; }
-#scroll-down svg{ width:18px; height:18px; }
-
-/* Content box: bright and flat; fills the available space */
 .chat-window{background:transparent; border:none; border-radius:0; min-height:auto}
 #chat-window{ background:transparent !important; border:none !important; border-radius:0 !important; padding:0 !important }
 /* Center conversation container and enable bubble alignment */
@@ -519,6 +512,7 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
           </span>
           <span class="sidebar-label">Chats</span>
         </button>
+        <button type="button" id="logout-btn" style="padding: 8px 16px; border-radius: 10px; border: 1px solid rgba(220,38,38,0.3); background: rgba(248,113,113,0.15); color: #b91c1c; font-weight: 600; cursor: pointer; margin-left: 10px;">Logout</button>
       </header>
       <main class="anag-main">
         <section id="library" class="tab-panel active">
@@ -600,12 +594,6 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
             <div class="chat-pane">
               <div class="chat-body" id="chat-body">
                 <div id="chat-window" class="chat-window"></div>
-                <button id="scroll-down" class="scroll-down" title="Scroll to bottom" aria-label="Scroll to bottom">
-                  <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                    <path d="M12 5v14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                    <path d="M7 14l5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                </button>
               </div>
 
               <div class="chat-footer">
@@ -793,6 +781,17 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
   window.addEventListener('load', grow);
   ta.addEventListener('focus', grow);
 })();
+</script>
+<script id="logout-handler">
+document.getElementById('logout-btn').addEventListener('click', async () => {
+  try {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    window.location.href = '/login';
+  } catch (err) {
+    console.error('Logout error:', err);
+    window.location.href = '/login';
+  }
+});
 </script>
   </body>
 </html>

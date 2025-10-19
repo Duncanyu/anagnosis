@@ -15,6 +15,9 @@ let bottomSentinel = null;
 let sentinelObserver = null;
 let isAtBottom = true; // updated by IntersectionObserver or math fallback
 let hasSentinelSignal = false;
+// Temporary spacer to pin last user message near the top without permanent space
+let tempBottomSpacer = null;
+let pinnedTopMessage = null;
 
 function ensureBottomSentinel() {
   if (!chatWindow) return null;
@@ -53,6 +56,7 @@ let selectedFiles = [];
 const dropZone = document.querySelector('.ingest-dropzone');
 
 const API_BASE = '/api';
+const AUTH_BASE = 'http://localhost:8000/api/auth';
 const chatHistory = [];
 const STORAGE_KEY = 'anag_conversations_v1';
 let conversations = {};
@@ -518,7 +522,7 @@ async function refreshLibrary() {
   if (libraryEmpty) libraryEmpty.style.display = 'block';
   libraryGrid.innerHTML = '';
   try {
-    const resp = await fetch(`${API_BASE}/library`);
+    const resp = await fetch(`${API_BASE}/library`, { credentials: 'include' });
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
     renderLibraryBooks(data.documents || []);
@@ -567,7 +571,7 @@ function startIngestPoll(jobId) {
 
   const poll = async () => {
     try {
-      const resp = await fetch(`${API_BASE}/ingest/status/${jobId}`);
+      const resp = await fetch(`${API_BASE}/ingest/status/${jobId}`, { credentials: 'include' });
       if (!resp.ok) {
         ingestLog.textContent = `Error: ${await resp.text()}`;
         scrollIngestToBottom();
@@ -682,6 +686,7 @@ async function uploadDocuments(files) {
   const resp = await fetch(`${API_BASE}/ingest`, {
     method: 'POST',
     body: formData,
+    credentials: 'include',
   });
   if (!resp.ok) {
     const text = await resp.text();
@@ -826,6 +831,62 @@ function scrollMessageStart(el) {
   } catch {}
 }
 
+function ensureTempSpacer(heightPx = 0) {
+  if (!chatWindow) return null;
+  if (!tempBottomSpacer || !tempBottomSpacer.isConnected) {
+    tempBottomSpacer = document.createElement('div');
+    tempBottomSpacer.id = 'temp-bottom-spacer';
+    tempBottomSpacer.style.cssText = 'width:100%;height:0px;pointer-events:none;';
+    chatWindow.appendChild(tempBottomSpacer);
+  }
+  const h = Math.max(0, Math.floor(heightPx));
+  tempBottomSpacer.style.height = h + 'px';
+  // Keep sentinel as the last element so the observer remains correct
+  try { ensureBottomSentinel(); } catch {}
+  return tempBottomSpacer;
+}
+
+function removeTempSpacer() {
+  try {
+    if (tempBottomSpacer && tempBottomSpacer.isConnected) tempBottomSpacer.remove();
+  } catch {}
+  tempBottomSpacer = null;
+  pinnedTopMessage = null;
+}
+
+function computeNeededSpacerForTop(el) {
+  try {
+    if (!chatBody || !el) return 0;
+    const rootRect = chatBody.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const delta = elRect.top - rootRect.top; // desired scroll delta to top
+    const desired = chatBody.scrollTop + delta;
+    const maxScroll = Math.max(0, chatBody.scrollHeight - chatBody.clientHeight);
+    const needed = Math.max(0, Math.ceil(desired - maxScroll));
+    return needed;
+  } catch { return 0; }
+}
+
+const TEMP_SPACER_VH_FRAC = 0.375; // ~37.5% of viewport height
+function getTempSpacerCap() {
+  try {
+    const h = Math.max(0, window.innerHeight || document.documentElement?.clientHeight || chatBody?.clientHeight || 0);
+    return Math.max(0, Math.round(h * TEMP_SPACER_VH_FRAC));
+  } catch { return 0; }
+}
+function alignMessageTopWithSpacer(el) {
+  try {
+    const needed = computeNeededSpacerForTop(el);
+    if (needed > 0) {
+      ensureTempSpacer(Math.min(needed, getTempSpacerCap()));
+      pinnedTopMessage = el;
+    } else {
+      removeTempSpacer();
+    }
+    scrollMessageStart(el);
+  } catch {}
+}
+
 function scrollChatToBottom() {
   if (!chatWindow) return;
   ensureBottomSentinel();
@@ -890,13 +951,24 @@ function appendUserMessage(text, options = {}) {
   if (sidebarMedia.matches) setSidebarOpen(false);
   ensureBottomSentinel();
   if (options.scroll !== false) {
-    scrollMessageStart(el);
-    requestAnimationFrame(() => scrollMessageStart(el));
-    setTimeout(() => scrollMessageStart(el), 120);
-    setTimeout(() => scrollMessageStart(el), 240);
+    alignMessageTopWithSpacer(el);
+    requestAnimationFrame(() => alignMessageTopWithSpacer(el));
+    setTimeout(() => alignMessageTopWithSpacer(el), 120);
+    setTimeout(() => alignMessageTopWithSpacer(el), 240);
   } else {
     updateScrollDownBtn();
   }
+  // Mark this conversation as recently interacted with (skip when replaying history)
+  try {
+    const isReplay = options && options.scroll === false && options.animate === false;
+    if (!isReplay && activeConvId && conversations[activeConvId]) {
+      const conv = conversations[activeConvId];
+      conv.updatedAt = Date.now();
+      conversations[activeConvId] = conv;
+      saveConversations();
+      renderConversationList();
+    }
+  } catch {}
   return el;
 }
 
@@ -904,6 +976,8 @@ function appendBotMessage(html, options = {}) {
   const el = createMessageElement('bot', html, { animate: options.animate !== false, html: true });
   const shouldScroll = options.scroll !== false;
   ensureBottomSentinel();
+  // Remove any temporary padding added for aligning user message
+  removeTempSpacer();
   if (shouldScroll) {
     scrollMessageStart(el);
     requestAnimationFrame(() => scrollMessageStart(el));
@@ -914,6 +988,7 @@ function appendBotMessage(html, options = {}) {
   }
   if (options.typeset !== false) {
     typesetMath().then(() => {
+      removeTempSpacer();
       if (shouldScroll) {
         scrollMessageStart(el);
         requestAnimationFrame(() => scrollMessageStart(el));
@@ -943,6 +1018,7 @@ async function askQuestion(payload, question) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      credentials: 'include',
     });
   } catch (err) {
     if (askLog) askLog.textContent = `Error: ${err}`;
@@ -959,6 +1035,7 @@ async function askQuestion(payload, question) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
+          credentials: 'include',
         });
         if (!direct.ok) {
           const t = await direct.text();
@@ -1109,6 +1186,7 @@ askForm?.addEventListener('submit', (evt) => {
 });
 
 clearChatBtn?.addEventListener('click', () => {
+  try { removeTempSpacer(); } catch {}
   chatWindow.innerHTML = '';
   if (askLog) askLog.textContent = 'Conversation cleared.';
   chatHistory.length = 0;
@@ -1537,6 +1615,15 @@ window.addEventListener('resize', () => {
   positionScrollButton();
   initScrollObserver();
   try { updateScrollDownBtn(); } catch {}
+  // Keep temporary padding proportional and alignment stable on resize
+  if (pinnedTopMessage) {
+    try { alignMessageTopWithSpacer(pinnedTopMessage); } catch {}
+  } else if (tempBottomSpacer && tempBottomSpacer.isConnected) {
+    // If we don't have a pinned element but spacer exists, cap it to the new proportion
+    try {
+      tempBottomSpacer.style.height = Math.max(0, Math.min(parseInt(tempBottomSpacer.style.height || '0', 10) || 0, getTempSpacerCap())) + 'px';
+    } catch {}
+  }
 });
 // No additional rotation on focus/click — only on initialization/new chat.
 // Scroll button visibility and behavior
