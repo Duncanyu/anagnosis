@@ -163,6 +163,9 @@
         const successMsg = document.getElementById('success-message');
         const submitBtn = document.getElementById('submit-btn');
         
+        const API_HOST = window.location.hostname || 'localhost';
+        const AUTH_BASE = `http://${API_HOST}:8000/api/auth`;
+
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
             
@@ -183,7 +186,7 @@
             submitBtn.textContent = 'Creating account...';
             
             try {
-                const response = await fetch('http://localhost:8000/api/auth/signup', {
+                const response = await fetch(`${AUTH_BASE}/signup`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ email, password })

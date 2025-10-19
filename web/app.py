@@ -480,15 +480,7 @@ def _generate_chat_title(text: str) -> str:
     return (t[:72] or "New chat").strip()
 
 
-@app.post("/api/chat/title")
-async def api_chat_title(req: Request) -> JSONResponse:
-    try:
-        data = await req.json()
-    except Exception:
-        data = {}
-    text = str(data.get("text") or data.get("summary") or "").strip()
-    title = _generate_chat_title(text)
-    return JSONResponse({"title": title})
+# Note: Chat title generation is now provided by the API server
 
 
 # ---------------------------------------------------------------------------
@@ -1023,119 +1015,19 @@ async def index(request: Request) -> HTMLResponse:
     )
 
 
-@app.get("/api/settings")
-async def get_settings() -> JSONResponse:
-    defaults = _settings_defaults()
-    keys = present_keys()
-    status = {
-        "openai": bool(keys.get("OPENAI_API_KEY")),
-        "hf": bool(keys.get("HF_TOKEN")),
-        "serpapi": bool(keys.get("SERPAPI_KEY")),
-        "brave": bool(keys.get("BRAVE_API_KEY")),
-    }
-    return JSONResponse({"defaults": defaults, "keys": status})
+# Note: Settings endpoints are now served by the API server
 
 
-@app.post("/api/settings")
-async def post_settings(request: Request) -> JSONResponse:
-    payload = await request.json()
-    message = _save_settings(payload)
-    status = _settings_defaults()
-    keys = present_keys()
-    key_status = {
-        "openai": bool(keys.get("OPENAI_API_KEY")),
-        "hf": bool(keys.get("HF_TOKEN")),
-        "serpapi": bool(keys.get("SERPAPI_KEY")),
-        "brave": bool(keys.get("BRAVE_API_KEY")),
-    }
-    return JSONResponse({"message": message, "defaults": status, "keys": key_status})
+# Note: Ingestion endpoints are now served by the API server
 
 
-@app.post("/api/ingest")
-async def api_ingest(files: List[UploadFile] = File(...)) -> JSONResponse:
-    if not files:
-        raise HTTPException(status_code=400, detail="Upload one or more PDFs.")
-    tmp_path = pathlib.Path(tempfile.mkdtemp(prefix="anag_upload_"))
-    paths: List[pathlib.Path] = []
-    names: List[str] = []
-    try:
-        for upload in files:
-            if not upload.filename.lower().endswith(".pdf"):
-                raise HTTPException(status_code=400, detail=f"Unsupported file: {upload.filename}")
-            dest = tmp_path / upload.filename
-            data = await upload.read()
-            dest.write_bytes(data)
-            paths.append(dest)
-            names.append(upload.filename)
-    except Exception:
-        shutil.rmtree(tmp_path, ignore_errors=True)
-        raise
-
-    job_id = _start_ingest_job(paths, tmp_path, names)
-    payload = _ingest_job_payload(job_id)
-    return JSONResponse(payload)
+# Note: Ask endpoints are now served by the API server
 
 
-@app.get("/api/ingest/status/{job_id}")
-async def api_ingest_status(job_id: str) -> JSONResponse:
-    payload = _ingest_job_payload(job_id)
-    return JSONResponse(payload)
+# Note: Library endpoints are now served by the API server
 
 
-@app.post("/api/ask")
-async def api_ask(request: Request) -> JSONResponse:
-    payload = await request.json()
-    result = _answer_question(payload)
-    return JSONResponse(result)
-
-
-@app.get("/api/library")
-async def api_library() -> JSONResponse:
-    documents = _library_inventory()
-    return JSONResponse({"documents": documents})
-
-
-@app.delete("/api/library/{doc_name}")
-async def api_library_delete(doc_name: str) -> JSONResponse:
-    removed = _remove_documents([doc_name])
-    if not removed:
-        raise HTTPException(status_code=404, detail="Document not found.")
-    return JSONResponse({"removed": removed})
-
-
-@app.post("/api/library/delete")
-async def api_library_delete_batch(request: Request) -> JSONResponse:
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    names = payload.get("names") or []
-    if not isinstance(names, list) or not names:
-        raise HTTPException(status_code=400, detail="names list required")
-    removed = _remove_documents([str(n) for n in names])
-    if not removed:
-        raise HTTPException(status_code=404, detail="No documents removed")
-    return JSONResponse({"removed": removed})
-
-
-@app.post("/api/library/clear")
-async def api_library_clear() -> JSONResponse:
-    docs = _library_inventory()
-    names = [d.get("name") for d in docs if d.get("name")]
-    removed = _remove_documents(names)
-    return JSONResponse({"removed": removed})
-
-
-@app.post("/api/ask/start")
-async def api_ask_start(request: Request) -> JSONResponse:
-    payload = await request.json()
-    job_id = _start_ask_job(payload)
-    return JSONResponse(_ask_job_payload(job_id))
-
-
-@app.get("/api/ask/status/{job_id}")
-async def api_ask_status(job_id: str) -> JSONResponse:
-    return JSONResponse(_ask_job_payload(job_id))
+# Note: Ask job endpoints are now served by the API server
 
 
 if __name__ == "__main__":  # pragma: no cover

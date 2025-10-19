@@ -55,10 +55,98 @@ const uploadListEl = document.getElementById('upload-list');
 let selectedFiles = [];
 const dropZone = document.querySelector('.ingest-dropzone');
 
-const API_BASE = '/api';
-const AUTH_BASE = 'http://localhost:8000/api/auth';
+const API_HOST = (window.location && window.location.hostname) ? window.location.hostname : 'localhost';
+// Use same-origin /api when not running local dev server on 7860
+const API_BASE = (window.location && (window.location.port === '7860' || window.location.hostname === 'localhost'))
+  ? `http://${API_HOST}:8000/api`
+  : `${window.location.origin}/api`;
+const AUTH_BASE = `${API_BASE}/auth`;
+
+// Global error banner helpers
+let __errorHideTimer = null;
+let __errorLastMsg = null;
+let __errorVisible = false;
+function showError(message) {
+  try {
+    const banner = document.getElementById('error-banner');
+    const textEl = document.getElementById('error-banner-text');
+    if (!banner || !textEl) return;
+    const msg = (typeof message === 'string') ? message : (message && message.message) ? message.message : String(message || 'Error');
+    const clipped = msg.slice(0, 800);
+    const same = __errorVisible && __errorLastMsg === clipped;
+    textEl.textContent = clipped;
+    banner.classList.add('show');
+    banner.setAttribute('aria-hidden', 'false');
+    __errorVisible = true;
+    __errorLastMsg = clipped;
+    if (!same) {
+      if (__errorHideTimer) { clearTimeout(__errorHideTimer); __errorHideTimer = null; }
+      __errorHideTimer = setTimeout(() => {
+        try { hideError(); } catch {}
+      }, 5000);
+    }
+  } catch {}
+}
+function hideError() {
+  try {
+    const banner = document.getElementById('error-banner');
+    if (!banner) return;
+    banner.classList.remove('show');
+    banner.setAttribute('aria-hidden', 'true');
+    if (__errorHideTimer) { clearTimeout(__errorHideTimer); __errorHideTimer = null; }
+    __errorVisible = false;
+  } catch {}
+}
+document.getElementById('error-banner-close')?.addEventListener('click', hideError);
+
+// Wrap fetch to surface any network/HTTP errors in the banner
+(function wrapFetch(){
+  if (!window.fetch || window.fetch.__wrapped) return;
+  const native = window.fetch.bind(window);
+  const wrapped = async function(input, init) {
+    try {
+      const resp = await native(input, init);
+      try {
+        if (!resp.ok) {
+          const url = (typeof input === 'string') ? input : (input && input.url) ? input.url : '';
+          const clone = resp.clone();
+          let body = '';
+          try { body = await clone.text(); } catch {}
+          const details = (body || '').slice(0, 300).replace(/\s+/g, ' ').trim();
+          showError(`${resp.status} ${resp.statusText} — ${url}${details ? ' — ' + details : ''}`);
+        }
+      } catch {}
+      return resp;
+    } catch (err) {
+      showError(err && err.message ? err.message : String(err));
+      throw err;
+    }
+  };
+  wrapped.__wrapped = true;
+  window.fetch = wrapped;
+})();
+
+// Global listeners for unexpected errors
+window.addEventListener('error', (e) => {
+  if (!e) return; showError(e.message || (e.error && e.error.message) || 'Unexpected error');
+});
+window.addEventListener('unhandledrejection', (e) => {
+  try { const r = e && e.reason; showError(r && (r.message || String(r)) || 'Unhandled rejection'); } catch {}
+});
 const chatHistory = [];
-const STORAGE_KEY = 'anag_conversations_v1';
+let currentUserId = null;
+try {
+  const authEl = document.getElementById('bootstrap-auth');
+  if (authEl?.textContent) {
+    const authData = JSON.parse(authEl.textContent);
+    const u = authData && authData.user;
+    const uid = u && (u.id || u.user_id || u.email);
+    if (uid) currentUserId = String(uid);
+  }
+} catch {}
+// Bump the storage prefix to reset all existing chats for all users
+const STORAGE_PREFIX = 'anag_conversations_v2';
+const STORAGE_KEY = currentUserId ? `${STORAGE_PREFIX}_${currentUserId}` : STORAGE_PREFIX;
 let conversations = {};
 let activeConvId = null;
 const ingestPolls = new Map();
@@ -545,6 +633,7 @@ async function removeLibraryDocument(name) {
   try {
     const resp = await fetch(`${API_BASE}/library/${encodeURIComponent(name)}`, {
       method: 'DELETE',
+      credentials: 'include',
     });
     if (!resp.ok) {
       const text = await resp.text();
@@ -646,6 +735,7 @@ function startIngestPoll(jobId) {
       }
       if (data.status === 'error' || data.status === 'cancelled') {
         if (data.error) ingestLog.textContent += `\n${data.error}`;
+        if (data.error) showError(data.error);
         scrollIngestToBottom();
         clearIngestPoll(jobId);
         if (uploadProgressBar) uploadProgressBar.classList.remove('active');
@@ -1040,6 +1130,7 @@ async function askQuestion(payload, question) {
         if (!direct.ok) {
           const t = await direct.text();
           if (askLog) askLog.textContent = `Error: ${t}`;
+          showError(t || 'Ask failed');
           if (sendBtn) sendBtn.disabled = false;
           return;
         }
@@ -1057,12 +1148,14 @@ async function askQuestion(payload, question) {
         }
       } catch (e) {
         if (askLog) askLog.textContent = `Error: ${e}`;
+        showError(e);
       }
       if (sendBtn) sendBtn.disabled = false;
       if (askProgress) askProgress.classList.remove('active');
       return;
     } else {
       if (askLog) askLog.textContent = `Error: ${text}`;
+      showError(text || 'Ask failed');
       if (sendBtn) sendBtn.disabled = false;
       if (askProgress) askProgress.classList.remove('active');
       return;
@@ -1079,7 +1172,7 @@ async function askQuestion(payload, question) {
   if (askPollHandle) { clearInterval(askPollHandle); askPollHandle = null; }
   const poll = async () => {
     try {
-      const s = await fetch(`${API_BASE}/ask/status/${jobId}`);
+      const s = await fetch(`${API_BASE}/ask/status/${jobId}`, { credentials: 'include' });
       if (!s.ok) {
         if (s.status === 404) {
           // Fallback: server missing status route; perform direct ask once.
@@ -1089,10 +1182,12 @@ async function askQuestion(payload, question) {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(payload),
+              credentials: 'include',
             });
             if (!direct.ok) {
               const t = await direct.text();
               if (askLog) askLog.textContent = `Error: ${t}`;
+              showError(t || 'Ask failed');
             } else {
               const d = await direct.json();
               if (askLog) { askLog.textContent = d.log || 'Ready.'; try { askLog.scrollTop = askLog.scrollHeight; } catch {} }
@@ -1109,6 +1204,7 @@ async function askQuestion(payload, question) {
             }
           } catch (e) {
             if (askLog) askLog.textContent = `Error: ${e}`;
+            showError(e);
           }
           if (sendBtn) sendBtn.disabled = false;
           if (askProgress) askProgress.classList.remove('active');
@@ -1116,6 +1212,7 @@ async function askQuestion(payload, question) {
         } else {
           const txt = await s.text();
           if (askLog) askLog.textContent = `Error: ${txt}`;
+          showError(txt || 'Ask status failed');
           clearInterval(askPollHandle); askPollHandle = null;
           if (sendBtn) sendBtn.disabled = false;
           if (askProgress) askProgress.classList.remove('active');
@@ -1141,11 +1238,13 @@ async function askQuestion(payload, question) {
       } else if (st.status === 'error' || st.status === 'cancelled') {
         clearInterval(askPollHandle); askPollHandle = null;
         if (askLog) askLog.textContent += `\n${st.error || st.status}`;
+        showError(st.error || st.status || 'Ask failed');
         if (sendBtn) sendBtn.disabled = false;
         if (askProgress) askProgress.classList.remove('active');
       }
     } catch (err) {
       if (askLog) askLog.textContent = `Error: ${err}`;
+      showError(err);
       clearInterval(askPollHandle); askPollHandle = null;
       if (sendBtn) sendBtn.disabled = false;
       if (askProgress) askProgress.classList.remove('active');
@@ -1228,10 +1327,12 @@ settingsForm?.addEventListener('submit', async (evt) => {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    credentials: 'include',
   });
   if (!resp.ok) {
     const text = await resp.text();
     settingsStatus.textContent = `Error: ${text}`;
+    showError(text || 'Failed to save settings');
     return;
   }
   const data = await resp.json();
@@ -1244,8 +1345,8 @@ settingsForm?.addEventListener('submit', async (evt) => {
 
 async function refreshSettingsStatus() {
   try {
-    const resp = await fetch(`${API_BASE}/settings`);
-    if (!resp.ok) return;
+    const resp = await fetch(`${API_BASE}/settings`, { credentials: 'include' });
+    if (!resp.ok) { const t = await resp.text(); showError(t || 'Failed to load settings'); return; }
     const data = await resp.json();
     if (data.defaults) {
       applyDefaults(data.defaults);
@@ -1261,6 +1362,7 @@ async function refreshSettingsStatus() {
     }
   } catch (err) {
     console.warn('Failed to refresh settings', err);
+    showError(err);
   }
 }
 
@@ -1362,10 +1464,11 @@ async function maybeUpdateTitleFrom(text) {
     // Only auto-title if the title is default-ish
     const isDefault = !current || current === 'New chat' || /^Summary:/i.test(current) || current.length < 4;
     if (!isDefault) return;
-    const resp = await fetch('/api/chat/title', {
+    const resp = await fetch(`${API_BASE}/chat/title`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: String(text || '').slice(0, 4000) }),
+      credentials: 'include',
     });
     if (!resp.ok) return;
     const data = await resp.json();
@@ -1565,6 +1668,7 @@ if (document.readyState === 'loading') {
     measureLayoutVars();
     positionScrollButton();
     initScrollObserver();
+    initDevTools();
     try { updateScrollDownBtn(); } catch {}
     try {
       const ftr = document.querySelector('.chat-footer');
@@ -1583,7 +1687,38 @@ if (document.readyState === 'loading') {
   measureLayoutVars();
   positionScrollButton();
   initScrollObserver();
+  initDevTools();
   try { updateScrollDownBtn(); } catch {}
+}
+
+function initDevTools() {
+  const statusEl = document.getElementById('dev-status');
+  async function callAdmin(path) {
+    const url = `${API_BASE}/admin/${path}`;
+    try {
+      const resp = await fetch(url, { method: 'POST', credentials: 'include' });
+      const text = await resp.text();
+      if (statusEl) statusEl.textContent = (resp.ok ? 'OK: ' : 'Error: ') + text;
+    } catch (err) {
+      if (statusEl) statusEl.textContent = `Error: ${err}`;
+    }
+  }
+  document.getElementById('dev-clear-settings')?.addEventListener('click', () => callAdmin('clear_settings'));
+  document.getElementById('dev-clear-memory')?.addEventListener('click', () => callAdmin('clear_memory'));
+  document.getElementById('dev-clear-all')?.addEventListener('click', () => callAdmin('clear_all'));
+  document.getElementById('dev-clear-chats')?.addEventListener('click', () => {
+    try {
+      const keys = Object.keys(localStorage);
+      let n = 0;
+      for (const k of keys) {
+        if (k.startsWith('anag_conversations_')) { localStorage.removeItem(k); n++; }
+      }
+      if (statusEl) statusEl.textContent = `Cleared ${n} conversation storages locally.`;
+      loadConversations();
+    } catch (err) {
+      if (statusEl) statusEl.textContent = `Error clearing chats: ${err}`;
+    }
+  });
 }
 
 // Global defensive delegation: ensure rename/delete always work
@@ -1650,10 +1785,11 @@ refreshLibraryBtn?.addEventListener('click', () => refreshLibrary());
 async function applyLibraryDeletes(names) {
   try {
     librarySaveController = new AbortController();
-    const resp = await fetch('/api/library/delete', {
+    const resp = await fetch(`${API_BASE}/library/delete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ names }),
+      credentials: 'include',
       signal: librarySaveController.signal,
     });
     if (!resp.ok) {
@@ -1706,7 +1842,7 @@ clearLibraryBtn?.addEventListener('click', async () => {
   const ok2 = confirm('Are you absolutely sure? This cannot be undone.');
   if (!ok2) return;
   try {
-    const resp = await fetch('/api/library/clear', { method: 'POST' });
+    const resp = await fetch(`${API_BASE}/library/clear`, { method: 'POST', credentials: 'include' });
     if (!resp.ok) { alert('Failed to clear library: ' + (await resp.text())); return; }
     pendingRemovals.clear();
     updateLibraryActionButtons();
