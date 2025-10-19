@@ -1,5 +1,6 @@
 from typing import Optional
 from fastapi import Request, HTTPException, status, Depends
+import os
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from api.db.database import get_db
@@ -53,3 +54,27 @@ def get_current_user_optional(
 ) -> Optional[User]:
     """Optional authentication - returns None if not authenticated instead of raising error."""
     return get_current_user(request, db)
+
+def is_dev_user(user: Optional[User]) -> bool:
+    if not user or not getattr(user, 'email', None):
+        return False
+    # Allow configuring dev emails via env; default to requested address
+    raw = os.environ.get('DEV_EMAILS', 'duncan.w.yu@gmail.com')
+    allowed = {e.strip().lower() for e in raw.split(',') if e.strip()}
+    try:
+        return user.email.lower() in allowed
+    except Exception:
+        return False
+
+def require_dev(
+    request: Request,
+    db: Session = Depends(get_db)
+) -> User:
+    """Require a developer/admin user. 403 if not privileged."""
+    user = require_auth(request, db)
+    if not is_dev_user(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient privileges",
+        )
+    return user

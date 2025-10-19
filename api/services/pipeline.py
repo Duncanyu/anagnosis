@@ -61,6 +61,8 @@ def ingest_documents(
     progress: ProgressFn = None,
     progress_pct: PctFn = None,
     should_cancel: CancelFn = None,
+    *,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Ingest documents into the vector index and produce summaries."""
 
@@ -129,7 +131,7 @@ def ingest_documents(
             _emit_pct(progress_pct, pct)
 
         _emit(progress, "Embedding and indexing…")
-        add_chunks(chunks, progress_cb=embed_cb)
+        add_chunks(chunks, progress_cb=embed_cb, user_id=user_id)
         _check_cancel(should_cancel)
         _emit_pct(progress_pct, 96)
 
@@ -185,6 +187,7 @@ def answer_question(
     progress_pct: PctFn = None,
     should_cancel: CancelFn = None,
     only_doc: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the question-answering pipeline synchronously."""
 
@@ -320,10 +323,25 @@ def answer_question(
 
         _check_cancel(should_cancel)
         _emit(progress, "Searching index…")
-        hits = search(question, k=pool, progress_cb=s_cb, timeout_sec=st, pool=pool, only_doc=only_doc)
+        hits = search(
+            question,
+            k=pool,
+            progress_cb=s_cb,
+            timeout_sec=st,
+            pool=pool,
+            only_doc=only_doc,
+            user_id=user_id,
+        )
         if only_doc and not hits:
             _emit(progress, "No hits in selected document; expanding to all documents…")
-            hits = search(question, k=pool, progress_cb=s_cb, timeout_sec=st, pool=pool)
+            hits = search(
+                question,
+                k=pool,
+                progress_cb=s_cb,
+                timeout_sec=st,
+                pool=pool,
+                user_id=user_id,
+            )
         _check_cancel(should_cancel)
         _emit(progress, f"Hits: {len(hits)}")
         rag_scores = [float(h[0]) for h in hits]
@@ -382,7 +400,7 @@ def answer_question(
     # Cross-conversation memory from memory.jsonl (always enabled)
     try:
         limit = int(os.getenv("MEMORY_TOKEN_LIMIT", "1200"))
-        recent = mem.load_recent(limit_tokens=limit) or []
+        recent = mem.load_recent(limit_tokens=limit, user_id=user_id) or []
         # Deduplicate against current in-session history
         hist_set = {
             ((t.get("q") or "").strip(), (t.get("a") or "").strip())

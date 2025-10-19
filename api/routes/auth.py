@@ -12,7 +12,7 @@ from api.auth.security import (
     validate_password,
     ACCESS_TOKEN_EXPIRE_DAYS
 )
-from api.auth.middleware import get_current_user, require_auth
+from api.auth.middleware import get_current_user, require_auth, is_dev_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -82,7 +82,7 @@ def login(request: LoginRequest, response: Response, db: Session = Depends(get_d
     
     return {
         "ok": True,
-        "user": {"id": str(user.id), "email": user.email}
+        "user": {"id": str(user.id), "email": user.email, "is_dev": bool(is_dev_user(user))}
     }
 
 @router.post("/logout")
@@ -103,6 +103,6 @@ def check_auth(request: Request, db: Session = Depends(get_db)):
     if user:
         return {
             "authenticated": True,
-            "user": {"id": str(user.id), "email": user.email}
+            "user": {"id": str(user.id), "email": user.email, "is_dev": bool(is_dev_user(user))}
         }
     return {"authenticated": False}
