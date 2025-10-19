@@ -310,6 +310,7 @@ def parse_pdf_bytes(pdf_bytes, progress_cb=None):
         pages.append({"page": i + 1, "text": text, "suspect": suspect})
         if suspect:
             suspect_pages.append(i + 1)
+        _log(progress_cb, f"#PAGE {i+1}/{n}")
     _log(progress_cb, "Parsing done")
     return {
         "num_pages": n,

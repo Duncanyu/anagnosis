@@ -104,7 +104,7 @@ def _ensure_index(dim):
         return
     _reset_index(dim, backend, model)
 
-def add_chunks(chunks, progress_cb=None):
+def add_chunks(chunks, progress_cb=None, user_id=None):
     texts, kept = [], []
     for c in chunks:
         t = (c.get("text") or "").strip()
@@ -112,6 +112,8 @@ def add_chunks(chunks, progress_cb=None):
             continue
         if not c.get("doc_name"):
             c["doc_name"] = "Unknown.pdf"
+        if user_id:
+            c["user_id"] = str(user_id)
         texts.append(t)
         kept.append(c)
     if not texts:
@@ -253,7 +255,7 @@ def _mmr_select_vectors(qv, dvs, base_scores, k=5, lambda_weight=0.7):
         pool.remove(best_i)
     return chosen
 
-def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None):
+def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None, only_doc=None, user_id=None):
     idx_path, _, _, _, _, _ = _active_paths()
     if not idx_path.exists():
         return []
@@ -273,7 +275,19 @@ def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None):
     for j, s in zip(I[0], D[0]):
         if j < 0 or j >= len(rows_all):
             continue
-        cand_rows.append(rows_all[j])
+        row = rows_all[j]
+        if user_id and row.get("user_id") != str(user_id):
+            continue
+        if only_doc:
+            # Filter by normalized filename match
+            try:
+                od = pathlib.Path(str(only_doc)).name.lower()
+            except Exception:
+                od = str(only_doc).lower()
+            dn = pathlib.Path(str(row.get("doc_name") or "")).name.lower()
+            if dn != od:
+                continue
+        cand_rows.append(row)
         cand_ids.append(int(j))
         emb_scores.append(float(max(0.0, s)))
     if not cand_rows:
@@ -381,5 +395,64 @@ def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None):
         out = agent.verify_answer(text, out)
     return out
 
-def list_chunks():
-    return _all_chunks()
+def list_chunks(user_id=None):
+    all_chunks = _all_chunks()
+    if user_id:
+        return [c for c in all_chunks if c.get("user_id") == str(user_id)]
+    return all_chunks
+
+def rebuild_index_from_rows(keep_rows, progress_cb=None):
+    """Rebuild the FAISS index and chunks file from already-existing rows.
+
+    This avoids re-embedding by reconstructing vectors for the kept row IDs
+    from the existing FAISS index and writing a fresh index + chunks file.
+    """
+    from numpy import vstack, array
+    idx_path, meta_path, ch_path, backend, model, key = _active_paths()
+    # If there is no index yet, fall back to a light reset + embed path
+    if not idx_path.exists():
+        clear_index()
+        if keep_rows:
+            add_chunks(keep_rows, progress_cb=progress_cb)
+        return
+    index = faiss.read_index(str(idx_path))
+    dim = index.d
+    # Determine keep IDs in the order of keep_rows
+    keep_ids = []
+    kr = []
+    for r in keep_rows:
+        try:
+            rid = int(r.get('rid'))
+        except Exception:
+            rid = None
+        if rid is None or rid < 0:
+            continue
+        keep_ids.append(rid)
+        kr.append(r)
+    if not keep_ids:
+        # No rows – clear artifacts to an empty index
+        _reset_index(dim, backend, model)
+        with ch_path.open('w', encoding='utf-8'):
+            pass
+        m = _meta(); m['count'] = 0; _write_meta(m)
+        return
+    # Reconstruct kept vectors (batched)
+    dvs = _reconstruct_batch(index, keep_ids, progress_cb=progress_cb)
+    if dvs is None:
+        # Fallback: re-embed if reconstruct is not available
+        clear_index()
+        add_chunks(kr, progress_cb=progress_cb)
+        return
+    # Reset index and write reconstructed vectors
+    _reset_index(dim, backend, model)
+    new_idx_path, _, _, _, _, _ = _active_paths()
+    new_index = faiss.IndexFlatIP(dim)
+    new_index.add(dvs)
+    faiss.write_index(new_index, str(new_idx_path))
+    m = _meta(); m['count'] = len(kr); _write_meta(m)
+    # Rewrite chunks file with new sequential rids
+    with ch_path.open('w', encoding='utf-8') as f:
+        for new_rid, row in enumerate(kr):
+            obj = dict(row)
+            obj['rid'] = new_rid
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")

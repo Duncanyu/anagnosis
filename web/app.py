@@ -962,17 +962,63 @@ def _start_ask_job(payload: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Auth helpers
+
+async def get_current_user(request: Request):
+    """Check if user is authenticated via cookie."""
+    try:
+        token = request.cookies.get("access_token")
+        if not token:
+            return None
+        # Verify token with the API server
+        import httpx
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "http://localhost:8000/api/auth/check",
+                cookies={"access_token": token},
+                timeout=5.0
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("authenticated"):
+                    return data.get("user")
+        return None
+    except Exception as e:
+        print(f"Auth check error: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Routes
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request) -> HTMLResponse:
+    """Serve the login page."""
+    return templates.TemplateResponse("login.html", {"request": request})
+
+
+@app.get("/signup", response_class=HTMLResponse)
+async def signup_page(request: Request) -> HTMLResponse:
+    """Serve the signup page."""
+    return templates.TemplateResponse("signup.html", {"request": request})
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
+    """Main application page - requires authentication."""
+    user = await get_current_user(request)
+    if not user:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/login", status_code=302)
+    
     defaults = _settings_defaults()
     return templates.TemplateResponse(
         "base.html",
         {
             "request": request,
             "defaults": defaults,
+            "user": user,
         },
     )
 
