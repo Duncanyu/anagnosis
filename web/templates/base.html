@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Anagnosis</title>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/app.css?v=15" />
+    <style>
+:root{
+  --header-h:96px;      /* runtime-measured header height (fallback) */
+  --gap:16px;
+  --sidebar-w:280px;    /* runtime-measured sidebar width (fallback) */
+  --footer-h:140px;     /* runtime-measured footer height (fallback) */
+}
+
+/* Flatten the entire app background (remove gradients) */
+html, body { background:#f2f4f8 !important; background-image:none !important; }
+.anag-main, .tab-panel, .ask-layout.full { background:transparent; }
+
+/* Two-column shell: fixed rail + fluid content */
+.ask-layout.full{
+  display:grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  gap:16px;
+  align-items:stretch;
+}
+
+/* Sidebar pinned; its own scroll */
+.chat-sidebar{
+  position:fixed;
+  top:var(--header-h);
+  bottom:0;
+  left:0;
+  width:var(--sidebar-w);
+  background:inherit;
+  z-index:200;               /* sit above footer */
+  overflow:hidden;           /* the inner regions manage their own scroll */
+  display:flex;
+  flex-direction:column;
+}
+
+/* Sidebar header on one line; small square new-chat button */
+.sidebar-header{ display:flex; align-items:center; justify-content:flex-start; gap:10px; padding:0 12px 6px 12px; margin-bottom:4px; }
+.sidebar-header h2{ margin:0; line-height:26px; font-weight:500; }
+#new-chat.icon{
+  width:28px; height:28px; min-width:28px; min-height:28px;
+  border-radius:8px; padding:0;
+  display:inline-flex; align-items:center; justify-content:center;
+  background: var(--primary); color:#fff; font-weight:700;
+  border:1px solid var(--accent-border-strong);
+  box-shadow: 0 10px 26px -12px rgba(var(--accent-rgb),0.65);
+}
+#new-chat.icon:hover{ filter:brightness(1.05); transform:translateY(1px); }
+#new-chat.icon svg{ width:16px; height:16px; display:block }
+
+/* App top bar fixed to the top */
+.anag-header{
+  position:fixed; top:0; left:0; right:0;
+  z-index:1000; background:#ffffff; /* higher-contrast top bar */
+  backdrop-filter:none;
+  border-bottom:1px solid rgba(15,23,42,0.08);
+  padding:12px 24px;          /* add horizontal/vertical padding */
+  display:flex;
+  align-items:center;
+  gap:18px;
+  flex-wrap:wrap;
+}
+.anag-header .brand{ display:flex; align-items:center; gap:12px; }
+.anag-header .anag-tabs{ display:flex; gap:10px; margin-right:4px; margin-left:auto; }
+
+/* Offset main content so it doesn't slide under the fixed header */
+.anag-main{ padding-top: var(--header-h); }
+
+/* Paint the left rail to the bottom ABOVE everything except the fixed top bar */
+body::before{
+  content:"";
+  position:fixed;
+  left:0; top:var(--header-h); bottom:0;
+  width:var(--sidebar-w);
+  background:rgba(15,23,42,0.04);
+  border-right:1px solid rgba(15,23,42,0.08);
+  z-index:900;              /* above footer/content/sidebar; below header (1000) */
+  pointer-events:none;      /* do not block clicks */
+}
+
+.chat-sidebar{
+  /* visually transparent; let body::before paint the rail */
+  background:transparent;
+  border:none;
+  border-radius:0;
+  overscroll-behavior:contain; scrollbar-gutter:stable both-edges;
+  overflow:hidden; /* lock to internal scrollers */
+  height:calc(100vh - var(--header-h));
+  z-index:260;
+}
+.chat-sidebar:hover{ overflow:hidden; }
+
+/* Sidebar regions: conversations scroll; ask log anchored and scrolls separately */
+.conv-list-wrap{ flex:1 1 auto; min-height:0; overflow:auto; padding:6px 12px 0 12px; }
+.conversation-list{ gap:6px; }
+.conversation-list li{ padding:8px 10px; border-radius:10px; }
+.ask-log-panel{ flex:0 0 var(--ask-log-h, 150px); height:var(--ask-log-h, 150px); margin:12px 12px 14px 12px; padding:10px; border-radius:12px; background:rgba(15,23,42,0.06); border:1px solid rgba(15,23,42,0.08); overflow:hidden; display:flex; flex-direction:column; justify-content:flex-end; margin-top:auto; }
+.ask-log-header{ font-size:.85rem; font-weight:600; color:#334155; opacity:.9; margin:0 0 6px 0 }
+.ask-log-panel pre{ margin:0; flex:1 1 auto; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+.ask-log-panel pre::-webkit-scrollbar{ display:none }
+.ask-log-panel pre{ scrollbar-width:none; -ms-overflow-style:none }
+
+/* Extend sidebar visually beneath the footer padding */
+
+/* Main column leaves space for sticky footer */
+.chat-pane{
+  grid-column:2;
+  min-height:calc(100vh - var(--header-h));
+  padding-bottom:0; /* chat-body handles space for footer */
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+}
+
+/* Content area uses the exact app background color */
+.chat-body{ flex:1 1 auto; overflow:auto; padding:12px 20px calc(var(--footer-h, 120px)*0.7 + 20px) 20px; background:#f2f4f8; position:relative }
+
+/* Sticky footer matches background exactly */
+.chat-footer{ position:fixed; left:var(--sidebar-w); right:0; bottom:0; 
+  background:#ffffff; border:0 !important; border-top:none !important; box-shadow:none; padding:12px 0 14px; z-index:40 }
+/* Ask progress bar anchored to the top edge of the footer */
+#ask-progress{ position:absolute; top:0; left:0; right:0; height:3px; border-radius:999px; background:rgba(148,163,184,0.25); overflow:hidden; display:none; z-index:1 }
+#ask-progress.active{ display:block }
+#ask-progress::before{ content:""; position:absolute; top:0; bottom:0; left:-40%; width:40%; background:var(--primary); border-radius:inherit; animation:askInd 1.2s ease-in-out infinite }
+@keyframes askInd{ 0%{ left:-40%; width:40% } 50%{ left:20%; width:40% } 100%{ left:100%; width:40% } }
+/* Different background for the input for clear separation */
+.chat-footer .chat-input textarea{
+  background:#ffffff; border:1px solid rgba(148,163,184,0.28); border-radius:12px; box-shadow:none;
+}
+
+/* Controls inline, dense, small, flat */
+.chat-settings-inline{font-size:.74rem}
+.chat-settings-inline fieldset{border:0;margin:0;padding:0;background:transparent}
+.chat-settings-inline legend{display:none}
+.chat-settings-inline .options{display:flex; flex-wrap:nowrap !important; align-items:center; gap:6px; margin:4px 0; padding:0 6px; overflow:visible; }
+.chat-settings-inline .options label{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  height:24px;
+  padding:0 8px;
+  gap:4px;
+  margin:0;
+  border-radius:999px;
+  flex:0 0 auto;
+  box-sizing:border-box;
+  font-size:.72rem;
+  font-weight:600;
+  white-space:nowrap;
+  background:rgba(15,23,42,0.1);
+  color:#334155;
+}
+.chat-settings-inline .options label span{ display:inline-block; text-align:center; }
+.chat-settings-inline .options label input[type="number"]{ width:52px; text-align:center; font-size:.72rem; padding:2px 6px; }
+.chat-settings-inline .options label select{ font-size:.72rem; padding:2px 16px 2px 8px; }
+.chat-settings-inline .options label:has(input[type="number"]),
+.chat-settings-inline .options label:has(select){ justify-content:space-between; }
+.chat-settings-inline .options label:has(input[type="number"]) span,
+.chat-settings-inline .options label:has(select) span{ margin-right:6px; }
+.chat-settings-inline .options{ scroll-behavior:smooth; }
+.chat-settings-inline input[type="number"]{ height:20px; padding:0 6px; width:52px; font-size:.68rem; text-align:center; -moz-appearance:textfield; border-radius:999px }
+.chat-settings-inline select{ height:20px; padding:0 12px 0 8px; font-size:.68rem; max-width:120px; border-radius:999px }
+.chat-settings-inline input[type="checkbox"]{width:14px; height:14px}
+.chat-controls{ display:block; background:transparent; border:none; border-radius:14px; padding:6px 6px 10px; position:relative; }
+.chat-controls summary{ display:none; cursor:pointer; list-style:none; }
+.chat-controls summary::-webkit-details-marker{ display:none; }
+
+/* Screen reader utility */
+.sr-only{ position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+
+/* Scroll-to-bottom button */
+#scroll-down{ position:fixed; left:50%; transform:translateX(-50%); bottom:calc(var(--footer-h, 120px) + 16px); display:none; align-items:center; justify-content:center; width:34px; height:34px; border-radius:999px; border:1px solid var(--accent-border-strong); background:var(--primary); color:#fff; box-shadow:0 12px 28px -14px rgba(15,23,42,0.45); cursor:pointer; z-index:2000; opacity:0.98 }
+#scroll-down.show{ display:inline-flex; }
+#scroll-down svg{ width:18px; height:18px; }
+
+/* Content box: bright and flat; fills the available space */
+.chat-window{background:transparent; border:none; border-radius:0; min-height:auto}
+#chat-window{ background:transparent !important; border:none !important; border-radius:0 !important; padding:0 !important }
+/* Center conversation container and enable bubble alignment */
+#chat-window{ display:flex; flex-direction:column; gap:12px; max-width:960px; margin:0 auto }
+#chat-window .chat-empty{
+  position:absolute; inset:0;              /* fill chat-body area */
+  display:flex; align-items:center; justify-content:center;
+  padding:0 16px calc(var(--footer-h) + 28px); /* avoid footer */
+  text-align:center;
+  font-weight:400;                        /* not bold */
+  color:rgba(15,23,42,0.70);              /* elegant dark */
+  letter-spacing:.2px;
+  font-size:clamp(1.4rem, 4.4vw, 2.2rem);
+  user-select:none; pointer-events:none;
+  z-index:10;
+  animation: emptyEnter .28s ease-out both;
+  will-change: opacity, transform;
+}
+/* Make user messages align harder to the right; bot to the left */
+#chat-window .message{ max-width:96%; }
+#chat-window .message.user{ align-self:flex-end; margin-left:auto; margin-right:0 }
+#chat-window .message.bot{ align-self:flex-start; margin-left:0; margin-right:auto }
+/* Remove the bot bubble entirely (no border or background) */
+#chat-window .message.bot{ background:transparent !important; border:none !important; padding:0 !important; box-shadow:none !important; }
+#chat-window .message.user{ background:var(--accent-bg-weak); border-radius:16px; padding:8px 12px; }
+#chat-window .message.bot pre{ background:rgba(241,245,249,0.55); }
+@keyframes messageEnter{ from{ opacity:0; transform:translateY(10px) scale(.97);} to{ opacity:1; transform:translateY(0) scale(1);} }
+#chat-window .message.entering{ animation:messageEnter .24s ease forwards; }
+
+@keyframes emptyEnter{ from{ opacity:0; transform:translateY(6px) } to{ opacity:1; transform:translateY(0) } }
+
+.sidebar-toggle{
+  display:none;
+  padding:6px 10px;
+  border-radius:999px;
+  border:1px solid var(--accent-border);
+  background:var(--accent-bg-mid);
+  color:var(--accent-text);
+  font-weight:600;
+  cursor:pointer;
+  transition:background .18s ease, transform .18s ease;
+  gap:8px;
+  align-items:center;
+}
+.sidebar-toggle:hover{ background:var(--accent-bg-hover); }
+.sidebar-toggle:active{ transform:translateY(1px); }
+.sidebar-toggle.is-open{ visibility:hidden; opacity:0; pointer-events:none; }
+.sidebar-toggle .sidebar-label{ display:none; }
+.sidebar-toggle .sidebar-icon{ display:inline-flex; flex-direction:column; justify-content:center; gap:3px; }
+.sidebar-toggle .sidebar-icon span{ display:block; width:16px; height:2px; background:currentColor; border-radius:999px; }
+
+/* --- Compact sticky footer input + controls -------------------------------- */
+/* Input row: keep textarea + Send on one line, add inner padding so Send
+   never clips the right edge */
+.chat-input{ display:flex; align-items:center; gap:10px; padding:0 14px; margin-bottom:6px; }
+#question{ flex:1 1 auto; min-height:34px; max-height:144px; padding:8px 10px; resize:none; font-size:.9rem; line-height:1.35; overflow-y:auto; }
+.send-btn{ flex:0 0 auto; height:32px; line-height:32px; padding:0 8px; display:inline-flex; align-items:center; justify-content:center; }
+.send-btn{ transition:transform .18s ease, box-shadow .18s ease; }
+.send-btn:active{ transform:translateY(1px) scale(0.98); }
+.send-btn:disabled{ opacity:.6; pointer-events:none; }
+
+/* Controls bar: single line, dense; squeeze horizontally */
+.chat-settings-inline{ font-size:.74rem }
+.chat-settings-inline .options{
+  display:flex; flex-wrap:nowrap; align-items:center; gap:6px; 
+  padding:0 8px 6px; margin:0; overflow:hidden;
+}
+/* Present checkboxes as flat toggle buttons */
+.chat-settings-inline .options input[type="checkbox"]{ position:absolute; opacity:0; width:1px; height:1px; margin:0; pointer-events:none }
+.chat-settings-inline .options label{
+  position:relative; display:inline-flex; align-items:center;
+  gap:4px; margin:0; padding:3px 6px; border-radius:8px; width:auto; box-sizing:border-box;
+  background:rgba(15,23,42,0.08);
+  color:#334155;
+  transition:background-color .15s ease, color .15s ease;
+  font-size:.68rem;
+}
+.chat-settings-inline .options label:has(input[type="checkbox"]:checked){
+  background:var(--primary-solid);   /* vibrant indigo */
+  color:#fff;
+}
+
+/* Tabs: neutral base; vibrant purple when active */
+.anag-tabs button{
+  background:rgba(255,255,255,0.86);
+  color:#1f2937;
+  box-shadow:none;
+}
+.anag-tabs button:hover:not(.active){ background:rgba(15,23,42,0.12) }
+.anag-tabs button.active{ background:var(--primary-solid); color:#fff }
+
+.chat-settings-inline input[type="number"]{ height:22px; padding:1px 4px; width:52px; font-size:.72rem; text-align:center; -moz-appearance:textfield; }
+.chat-settings-inline input[type="number"]::-webkit-outer-spin-button,
+.chat-settings-inline input[type="number"]::-webkit-inner-spin-button{ -webkit-appearance:none; margin:0; }
+/* Darker sticky bar so it stands out from content */
+/* .chat-footer{ background:rgba(15,23,42,0.06); } */
+.chat-settings-inline select{ height:22px; padding:0 14px 0 6px; font-size:.72rem; max-width:102px }
+
+/* Slightly tighter labels for long fields */
+.chat-settings-inline .options label:has(#time-budget),
+.chat-settings-inline .options label:has(#max-batches),
+.chat-settings-inline .options label:has(#top-k){ padding-right:2px }
+
+/* Content box remains bright and fills space */
+.chat-window{ min-height:auto }
+
+/* Library layout ---------------------------------------------------------- */
+
+#library.tab-panel{ flex:1 1 auto; min-height:0; }
+#library.tab-panel.active{ display:flex; flex-direction:column; min-height:0; }
+
+.library-layout{
+  flex:1 1 auto;
+  display:flex;
+  flex-direction:column;
+  gap:24px;
+  padding:26px 26px 34px;
+  min-height:0;
+}
+
+.library-panel{
+  background:rgba(255,255,255,0.86);
+  border:1px solid rgba(148,163,184,0.16);
+  border-radius:24px;
+  box-shadow:0 32px 70px -40px rgba(15,23,42,0.35);
+  backdrop-filter:saturate(1.05) blur(6px);
+  padding:36px 36px 28px;
+  display:flex;
+  flex-direction:column;
+  gap:20px;
+  min-height:0;
+}
+
+.library-panel.library-ingest{ flex:0 0 auto; }
+.library-panel.library-shelf{ flex:1 1 auto; min-height:0; }
+
+.ingest-header h2{ margin:0; font-size:1.55rem; color:#101828; }
+.ingest-header p{ margin:6px 0 0 0; font-size:.94rem; color:#475569; }
+
+.ingest-form{ display:flex; flex-direction:column; gap:18px; min-height:260px; justify-content:flex-start; }
+
+.ingest-dropzone{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:18px;
+  border:2px dashed var(--accent-border-strong);
+  background:var(--accent-bg-faint);
+  border-radius:20px;
+  padding:60px 40px;
+  min-height:240px;
+  cursor:pointer;
+  transition:border-color .18s ease, background .18s ease, transform .18s ease;
+  width:min(90%, 900px);
+  max-width:900px;
+  margin:8px auto 0;
+  position:relative;
+}
+.ingest-dropzone:hover{ border-color:var(--accent-border-strong); background:var(--accent-bg-weak); }
+.ingest-dropzone:active{ transform:translateY(1px); }
+.drop-text{ display:flex; flex-direction:column; gap:6px; color:#1e293b; text-align:center; }
+.drop-title{ font-weight:700; font-size:1.2rem; }
+.drop-title .upload-icon{ display:inline-block; width:28px; height:28px; line-height:28px; text-align:center; background:#e0e7ff; color:var(--accent-text); border-radius:8px; margin-right:8px; font-size:16px; }
+.drop-sub{ font-size:.88rem; color:#475569; }
+.drop-foot{ font-size:.78rem; color:#64748b; }
+.drop-action{ position:absolute; right:18px; bottom:18px; font-weight:700; font-size:1rem; color:var(--accent-text); white-space:nowrap; background:var(--accent-bg-active); border:1px solid var(--accent-border); padding:12px 18px; border-radius:12px; }
+.ingest-dropzone.dragover{ border-color:var(--accent-strong); background:var(--accent-bg-weak); box-shadow:0 0 0 3px var(--accent-bg-mid) inset; }
+
+.ingest-list{ max-height:240px; overflow:auto; padding-right:4px; display:flex; flex-direction:column; gap:12px; }
+.ingest-list li{ list-style:none; }
+.upload-list .upload-item{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid rgba(15,23,42,0.18); background:#f8fafc; border-radius:10px; }
+.upload-item .file-main{ display:flex; flex-direction:column; gap:4px; min-width:0; }
+.upload-item .file-name{ font-weight:600; color:#0f172a; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.upload-item .file-meta{ font-size:.78rem; color:#475569; }
+.upload-item .file-actions{ flex:0 0 auto; display:flex; gap:8px; }
+.upload-item .remove{ border-radius:999px; padding:6px 10px; border:1px solid rgba(220,38,38,0.25); background:rgba(248,113,113,0.14); color:#b91c1c; font-weight:600; }
+.ingest-progress{ display:none; flex-direction:column; gap:4px; }
+.ingest-progress.show{ display:flex; }
+.ingest-progress .progress-track{ height:8px; border-radius:999px; }
+.ingest-progress .progress-status{ font-size:.8rem; color:#475569; min-height:0; }
+.ingest-actions{ display:flex; justify-content:flex-end; gap:12px; }
+.ingest-actions .secondary{ border-radius:16px; padding:12px 20px; border:1px solid var(--accent-border); background:var(--accent-bg-weak); color:var(--accent-text); font-weight:600; }
+.ingest-log-block details > summary{ cursor:pointer; font-weight:600; color:#334155; margin-bottom:4px; }
+.ingest-log{ max-height:180px; background:rgba(15,23,42,0.05); border:1px solid rgba(148,163,184,0.18); border-radius:16px; padding:16px; font-family:'JetBrains Mono','Menlo','SFMono-Regular',monospace; font-size:.82rem; line-height:1.5; overflow:auto; white-space:pre-wrap; color:#0f172a; -ms-overflow-style:none; scrollbar-width:none; }
+.ingest-log::-webkit-scrollbar{ display:none }
+
+.library-shelf-header{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.library-shelf-header h3{ margin:0; font-size:1.4rem; color:#0f172a; }
+.library-shelf-header p{ margin:4px 0 0 0; font-size:.9rem; color:#4b5563; }
+.library-shelf-header button{ border-radius:999px; padding:6px 12px; border:1px solid var(--accent-border); background:var(--accent-bg-weak); color:var(--accent-text); font-weight:600; cursor:pointer; transition:background .18s ease, transform .18s ease; }
+.library-shelf-header button:hover{ background:var(--accent-bg-hover); }
+.library-shelf-header button:active{ transform:translateY(1px); }
+.library-shelf-header .library-actions{ display:flex; gap:8px; align-items:center; }
+.library-shelf-header .primary{ border:1px solid rgba(34,197,94,0.35); background:rgba(34,197,94,0.15); color:#166534; }
+.library-shelf-header .primary:hover{ background:rgba(34,197,94,0.22); }
+.library-shelf-header .danger{ border:1px solid rgba(220,38,38,0.30); background:rgba(248,113,113,0.14); color:#b91c1c; }
+.library-shelf-header .danger:hover{ background:rgba(248,113,113,0.22); }
+.library-shelf-header #cancel-library{ border:1px solid rgba(148,163,184,0.35); background:rgba(255,255,255,0.7); color:#334155; }
+.library-shelf-header #cancel-library:hover{ background:rgba(241,245,249,0.9); }
+
+.library-grid{ flex:1 1 auto; display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:16px; overflow:auto; padding-bottom:8px; min-height:0; }
+.library-grid.loading{ opacity:.6; }
+.library-empty{ font-size:.9rem; color:#64748b; text-align:center; padding:32px 0; display:none; }
+
+.book-card{ position:relative; display:flex; flex-direction:column; gap:10px; padding:16px 16px 16px 28px; border-radius:18px; background:linear-gradient(135deg, rgba(var(--accent-rgb),0.22), rgba(129,140,248,0.12)); border:1px solid rgba(var(--accent-rgb),0.22); box-shadow:0 14px 32px -20px rgba(79,70,229,0.45); color:#1e293b; min-height:0; max-height:260px; overflow:hidden; }
+.book-card::before{ content:''; position:absolute; top:12px; bottom:12px; left:10px; width:8px; border-radius:6px; background:rgba(79,70,229,0.35); box-shadow:inset -1px 0 0 rgba(255,255,255,0.45); }
+.book-card .book-title{ font-weight:600; font-size:.95rem; margin:0; }
+.book-card .book-meta{ font-size:.78rem; color:#475569; display:flex; gap:12px; flex-wrap:wrap; }
+.book-card .book-summary{ font-size:.8rem; color:#1f2937; line-height:1.45; flex:1 1 auto; overflow:auto; max-height:150px; padding-right:2px; scrollbar-width:none; }
+.book-card .book-summary::-webkit-scrollbar{ width:0; height:0; }
+.book-card .book-actions{ display:flex; justify-content:flex-end; }
+.book-card button{ border-radius:999px; padding:4px 10px; border:1px solid rgba(220,38,38,0.25); background:rgba(248,113,113,0.14); color:#b91c1c; font-size:.78rem; font-weight:600; cursor:pointer; transition:background .18s ease, transform .18s ease; }
+.book-card button:hover{ background:rgba(248,113,113,0.22); }
+.book-card button:active{ transform:translateY(1px); }
+.book-card.pending-remove{ opacity:.55; filter:saturate(.8); }
+
+@media (max-width: 980px){
+  .library-layout{ padding:20px 18px 28px; gap:18px; }
+  .library-panel{ padding:22px 22px 20px; }
+  .library-grid{ grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); }
+}
+
+@media (max-width: 640px){
+  .ingest-dropzone{ flex-direction:column; align-items:flex-start; }
+  .drop-action{ align-self:flex-end; }
+}
+
+/* Prevent accidental horizontal scrollbars anywhere */
+html, body { overflow-x: hidden; }
+/* Hide scrollbars (while preserving scroll) for a cleaner look */
+html::-webkit-scrollbar, body::-webkit-scrollbar { width: 0; height: 0 }
+html, body { scrollbar-width: none; -ms-overflow-style: none }
+
+/* Settings layout ---------------------------------------------------------- */
+.settings-layout{ display:flex; flex-direction:column; gap:14px; }
+.settings-grid{ display:grid; grid-template-columns:repeat(12, 1fr); gap:16px; }
+.settings-card{ grid-column: span 12; background:rgba(255,255,255,0.86); border:1px solid rgba(148,163,184,0.18); border-radius:16px; padding:18px 18px 12px; box-shadow:0 24px 56px -40px rgba(15,23,42,0.35); }
+.settings-card h3{ margin:0 0 10px 0; font-size:1.1rem; color:#0f172a; }
+.settings-card .field{ display:flex; flex-direction:column; gap:6px; margin:8px 0; }
+.settings-card .field.two{ display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; }
+.settings-card label{ font-weight:600; font-size:.85rem; color:#334155; }
+.settings-card input, .settings-card select{ width:100%; border-radius:10px; border:1px solid rgba(148,163,184,0.3); padding:10px 12px; font-size:.92rem; background:#f8fafc }
+.settings-card .inline{ margin:4px 0; }
+.settings-card .inline{ display:flex; align-items:center; }
+.settings-card .checkbox{ font-weight:600; color:#334155; display:inline-flex; align-items:center; gap:8px; }
+.settings-card .checkbox input[type="checkbox"]{ width:16px; height:16px; }
+.settings-card input[type="number"]{ -moz-appearance:textfield; }
+.settings-card input[type="number"]::-webkit-outer-spin-button,
+.settings-card input[type="number"]::-webkit-inner-spin-button{ -webkit-appearance:none; margin:0; }
+.settings-footer{ display:flex; align-items:center; gap:12px; justify-content:flex-start; padding:4px 4px 0; }
+@media (min-width: 980px){
+  .settings-card:nth-child(1){ grid-column: span 6 }
+  .settings-card:nth-child(2){ grid-column: span 6 }
+  .settings-card:nth-child(3){ grid-column: span 6 }
+  .settings-card:nth-child(4){ grid-column: span 6 }
+}
+.chat-body::-webkit-scrollbar, .conv-list-wrap::-webkit-scrollbar { width: 0; height: 0 }
+.chat-body, .conv-list-wrap { scrollbar-width: none; -ms-overflow-style: none }
+
+#sidebar-backdrop{ display:none; }
+
+/* Responsive: unpin rail on very small screens */
+@media (max-width: 880px){
+  :root{ --footer-h:220px; }
+}
+
+@media (max-width: 1100px){
+  body::before{ display:none; }
+  .ask-layout.full{ grid-template-columns:1fr; }
+  .chat-pane{ grid-column:1; }
+  .chat-footer{ left:0; padding:12px 12px 18px; }
+  .sidebar-toggle{ display:inline-flex; align-items:center; gap:6px; }
+  .chat-sidebar{
+    position:fixed;
+    top:var(--header-h);
+    bottom:0;
+    left:0;
+    width:min(88vw, 320px);
+    max-width:320px;
+    height:calc(100vh - var(--header-h));
+    transform:translateX(calc(-100% - 16px));
+    transition:transform .25s ease;
+    background:#e0e4ff;
+    border-radius:0 18px 18px 0;
+    box-shadow:0 20px 60px -32px rgba(15,23,42,0.65);
+    overflow-y:auto;
+  }
+  .chat-sidebar::-webkit-scrollbar{ width:0; height:0; }
+  .chat-sidebar{ scrollbar-width:none; -ms-overflow-style:none; }
+  body.sidebar-open .chat-sidebar{ transform:translateX(0); }
+  #sidebar-backdrop{
+    position:fixed;
+    top:var(--header-h);
+    left:0; right:0; bottom:0;
+    background:rgba(15,23,42,0.32);
+    z-index:199;
+    display:none;
+  }
+  body.sidebar-open #sidebar-backdrop{ display:block; }
+  body.sidebar-open{ overflow:hidden; }
+  .chat-controls{ padding:6px 6px 2px; }
+  .chat-controls summary{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    cursor:pointer;
+    font-weight:600;
+    margin:0 0 6px;
+    font-size:.8rem;
+  }
+  .chat-controls summary::after{ content:'▾'; font-size:.9em; margin-left:8px; transition:transform .2s ease; }
+  .chat-controls[open] summary::after{ transform:rotate(180deg); }
+  .chat-controls:not([open]) .options{ display:none; }
+  .chat-controls[open] .options{ flex-wrap:wrap !important; overflow:auto; max-height:40vh; padding:0 8px 8px; }
+}
+    </style>
+  </head>
+  <body>
+    <div id="app" class="anag-shell">
+      <header class="anag-header">
+        <div class="brand">
+          <img src="/assets/icon.png" alt="Anagnosis logo" class="brand-logo" />
+          <h1>Anagnosis · DEV</h1>
+        </div>
+        <nav class="anag-tabs">
+          <button data-tab="library" class="active">Library</button>
+          <button data-tab="ask">Ask!</button>
+          <button data-tab="settings">Settings</button>
+        </nav>
+        <button type="button" id="toggle-sidebar" class="sidebar-toggle" aria-label="Toggle chats" aria-expanded="false" aria-controls="conversation-list">
+          <span class="sidebar-icon" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </span>
+          <span class="sidebar-label">Chats</span>
+        </button>
+      </header>
+      <main class="anag-main">
+        <section id="library" class="tab-panel active">
+          <div class="library-layout">
+            <div class="library-panel library-ingest">
+              <div class="ingest-header">
+                <h2>Ingest documents</h2>
+                <p>Select PDFs to enrich your library. The pipeline will OCR, chunk, embed, and summarize each file.</p>
+              </div>
+              <form id="upload-form" class="ingest-form" enctype="multipart/form-data">
+                <input id="upload-input" name="files" type="file" accept="application/pdf" multiple hidden />
+                <label for="upload-input" class="ingest-dropzone">
+                  <div class="drop-text">
+                    <span class="drop-title"><span class="upload-icon" aria-hidden="true">📄</span> Drag and drop PDFs here</span>
+                    <span class="drop-sub">or click to browse for documents</span>
+                  </div>
+                </label>
+
+                <ul id="upload-list" class="upload-list ingest-list"></ul>
+
+                <div class="ingest-actions">
+                  <button type="button" id="clear-selection" class="secondary">Clear</button>
+                  <button type="submit" class="primary" id="start-ingestion">Next</button>
+                </div>
+              </form>
+
+              <div class="ingest-log-block">
+                <details id="log-toggle" open>
+                  <summary>Status</summary>
+                  <div class="ingest-progress">
+                    <div id="upload-progress-track" class="progress-track">
+                      <div id="upload-progress" class="progress-bar"></div>
+                    </div>
+                    <div id="upload-progress-status" class="progress-status"></div>
+                  </div>
+                  <pre id="ingest-log" class="ingest-log">No activity yet.</pre>
+                </details>
+              </div>
+            </div>
+
+            <div class="library-panel library-shelf">
+              <div class="library-shelf-header">
+                <div>
+                  <h3>Your library</h3>
+                  <p>All ingested documents appear below. Remove books to reclaim space.</p>
+                </div>
+                <div class="library-actions">
+                  <button type="button" id="clear-library" class="danger">Clear all</button>
+                  <button type="button" id="cancel-library" style="display:none">Cancel</button>
+                  <button type="button" id="save-library" class="primary" style="display:none">Save</button>
+                </div>
+              </div>
+              <div id="library-grid" class="library-grid"></div>
+              <div id="library-empty" class="library-empty">Your library is empty. Ingest a PDF to get started.</div>
+            </div>
+          </div>
+        </section>
+        <section id="ask" class="tab-panel">
+          <div class="ask-layout full">
+            <aside class="chat-sidebar">
+              <div class="sidebar-header">
+                <h2>Chats</h2>
+                <button class="primary icon" id="new-chat" title="Start a new chat" aria-label="New chat">
+                  <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/>
+                    <path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  </svg>
+                </button>
+              </div>
+              <div class="conv-list-wrap">
+                <ul id="conversation-list" class="conversation-list"></ul>
+              </div>
+              <section class="ask-log-panel" aria-label="Ask log panel">
+                <div class="ask-log-header">Ask log</div>
+                <pre id="ask-log">Ready.</pre>
+              </section>
+            </aside>
+
+            <div class="chat-pane">
+              <div class="chat-body" id="chat-body">
+                <div id="chat-window" class="chat-window"></div>
+                <button id="scroll-down" class="scroll-down" title="Scroll to bottom" aria-label="Scroll to bottom">
+                  <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                    <path d="M12 5v14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    <path d="M7 14l5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+              </div>
+
+              <div class="chat-footer">
+                <div id="ask-progress" class="ask-progress" aria-hidden="true"></div>
+                <form id="ask-form" class="chat-input">
+                  <textarea id="question" name="question" rows="1" placeholder="Ask anything about your library…"></textarea>
+                  <button type="submit" class="primary send-btn" title="Send" aria-label="Send">
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                      <path d="M12 19V6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                      <path d="M7 11l5-5 5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span class="sr-only">Send</span>
+                  </button>
+                </form>
+                <div class="chat-settings-inline">
+                  <details class="chat-controls" open>
+                    <summary>Options</summary>
+                    <fieldset class="options">
+                    
+                    <label><input type="checkbox" id="formula-mode" /><span>Formula mode</span></label>
+                    <label><input type="checkbox" id="agents-enabled" /><span>Agents</span></label>
+                    <label><input type="checkbox" id="web-enabled" /><span>Web search</span></label>
+                    <label><input type="checkbox" id="exhaustive" {% if defaults["ASK_EXHAUSTIVE"] %}checked{% endif %} /><span>Exhaustive sweep</span></label>
+                    <label><span>Top-K</span><input type="number" id="top-k" value="10" min="1" max="50" /></label>
+                    <label><span>Max batches</span><input type="number" id="max-batches" value="{{ defaults['ASK_MAX_BATCHES'] }}" min="1" max="20" /></label>
+                    <label><span>Time budget (s)</span><input type="number" id="time-budget" value="{{ defaults['ASK_TIME_BUDGET_SEC'] }}" min="30" max="900" step="15" /></label>
+                    <label><span>Only document</span>
+                      <select id="only-doc">
+                        <option value="">All documents</option>
+                      </select>
+                    </label>
+                    <label><span>Reranker</span>
+                      <select id="reranker">
+                        <option value="off" {% if defaults['ASK_RERANKER']=='off' %}selected{% endif %}>Off</option>
+                        <option value="minilm" {% if defaults['ASK_RERANKER']=='minilm' %}selected{% endif %}>MiniLM</option>
+                        <option value="bge-m3" {% if defaults['ASK_RERANKER']=='bge-m3' %}selected{% endif %}>BGE-M3</option>
+                        <option value="bge-base" {% if defaults['ASK_RERANKER']=='bge-base' %}selected{% endif %}>BGE-Base</option>
+                        <option value="bge-large" {% if defaults['ASK_RERANKER']=='bge-large' %}selected{% endif %}>BGE-Large</option>
+                      </select>
+                    </label>
+                    </fieldset>
+                  </details>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section id="settings" class="tab-panel">
+          <form id="settings-form" class="settings-layout">
+            <div class="settings-grid">
+              <section class="settings-card">
+                <h3>API keys</h3>
+                <div class="field"><label for="openai-key">OpenAI API key</label><input type="password" id="openai-key" placeholder="sk-…" /></div>
+                <div class="field"><label for="hf-token">HuggingFace token</label><input type="password" id="hf-token" placeholder="hf_…" /></div>
+                <div class="field"><label for="serp-key">SerpAPI key</label><input type="password" id="serp-key" placeholder="serp_…" /></div>
+                <div class="field"><label for="brave-key">Brave API key</label><input type="password" id="brave-key" placeholder="brv_…" /></div>
+              </section>
+
+              <section class="settings-card">
+                <h3>Backends & models</h3>
+                <div class="field"><label for="embed-backend">Embedding backend</label>
+                  <select id="embed-backend">
+                    <option value="hf" {% if defaults['EMBED_BACKEND']=='hf' %}selected{% endif %}>HF</option>
+                    <option value="openai" {% if defaults['EMBED_BACKEND']=='openai' %}selected{% endif %}>OpenAI</option>
+                  </select>
+                </div>
+                <div class="field"><label for="llm-backend">LLM backend</label>
+                  <select id="llm-backend">
+                    <option value="openai" {% if defaults['LLM_BACKEND']=='openai' %}selected{% endif %}>OpenAI</option>
+                    <option value="vllm" {% if defaults['LLM_BACKEND']=='vllm' %}selected{% endif %}>vLLM</option>
+                  </select>
+                </div>
+                <div class="field"><label for="openai-model">OpenAI chat model</label><input type="text" id="openai-model" value="{{ defaults['OPENAI_CHAT_MODEL'] }}" /></div>
+                <div class="field"><label for="hf-model">HF LLM name</label><input type="text" id="hf-model" value="{{ defaults['HF_LLM_NAME'] }}" /></div>
+              </section>
+
+              <section class="settings-card">
+                <h3>Memory & limits</h3>
+                <div class="inline">
+                  <label class="checkbox"><input type="checkbox" id="settings-memory" {% if defaults['MEMORY_ENABLED'] %}checked{% endif %} /> Enable memory</label>
+                </div>
+                <div class="field"><label for="memory-tokens">Memory token limit</label><input type="number" id="memory-tokens" value="{{ defaults['MEMORY_TOKEN_LIMIT'] }}" /></div>
+                <div class="field"><label for="memory-file-mb">Memory file limit (MB)</label><input type="number" id="memory-file-mb" value="{{ defaults['MEMORY_FILE_LIMIT_MB'] }}" /></div>
+                <div class="field two">
+                  <div><label for="openai-tpm">OpenAI TPM</label><input type="number" id="openai-tpm" value="{{ defaults['OPENAI_TPM'] }}" /></div>
+                  <div><label for="openai-rpm">OpenAI RPM</label><input type="number" id="openai-rpm" value="{{ defaults['OPENAI_RPM'] }}" /></div>
+                </div>
+              </section>
+
+              <section class="settings-card">
+                <h3>Ask defaults</h3>
+                <div class="field"><label for="ask-char-budget">Ask char budget</label><input type="number" id="ask-char-budget" value="{{ defaults['ASK_BATCH_CHAR_BUDGET'] }}" /></div>
+                <div class="field two">
+                  <div><label for="ask-max-batches">Ask max batches</label><input type="number" id="ask-max-batches" value="{{ defaults['ASK_MAX_BATCHES'] }}" /></div>
+                  <div><label for="ask-time-budget">Ask time budget (s)</label><input type="number" id="ask-time-budget" value="{{ defaults['ASK_TIME_BUDGET_SEC'] }}" /></div>
+                </div>
+                <div class="inline">
+                  <label class="checkbox"><input type="checkbox" id="settings-exhaustive" {% if defaults['ASK_EXHAUSTIVE'] %}checked{% endif %} /> Exhaustive sweep</label>
+                </div>
+                <div class="field"><label for="settings-reranker">Reranker</label>
+                  <select id="settings-reranker">
+                    <option value="off" {% if defaults['ASK_RERANKER']=='off' %}selected{% endif %}>Off</option>
+                    <option value="minilm" {% if defaults['ASK_RERANKER']=='minilm' %}selected{% endif %}>MiniLM</option>
+                    <option value="bge-m3" {% if defaults['ASK_RERANKER']=='bge-m3' %}selected{% endif %}>BGE-M3</option>
+                    <option value="bge-base" {% if defaults['ASK_RERANKER']=='bge-base' %}selected{% endif %}>BGE-Base</option>
+                    <option value="bge-large" {% if defaults['ASK_RERANKER']=='bge-large' %}selected{% endif %}>BGE-Large</option>
+                  </select>
+                </div>
+                <div class="field"><label for="ask-candidates">Candidate pool size</label><input type="number" id="ask-candidates" value="{{ defaults['ASK_CANDIDATES'] }}" /></div>
+              </section>
+            </div>
+
+            <div class="settings-footer">
+              <button type="submit" class="primary">Save settings</button>
+              <span id="settings-status"></span>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+    <script id="bootstrap-settings" type="application/json">{{ defaults | tojson | safe }}</script>
+    <div id="sidebar-backdrop"></div>
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [ ['$', '$'], ['\\(', '\\)'] ],
+          displayMath: [ ['$$', '$$'], ['\\[', '\\]'] ],
+          processEscapes: true
+        },
+        options: {
+          skipHtmlTags: ['script','noscript','style','textarea','pre','code'],
+          renderActions: { addMenu: [] }
+        }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="/static/app.js?v=36"></script>
+<script id="sticky-autosize">
+(function(){
+  const root = document.documentElement;
+  const setHeaderH = () => {
+    const hdr = document.querySelector('.anag-header');
+    if(!hdr) return;
+    const h = Math.ceil(hdr.getBoundingClientRect().height);
+    if (h > 0) root.style.setProperty('--header-h', h+'px');
+  };
+  const setFooterH = () => {
+    const f = document.querySelector('.chat-footer');
+    if(!f) return;
+    const h = Math.ceil(f.getBoundingClientRect().height);
+    // Avoid writing zero when Ask tab is hidden to prevent visible snap later
+    if (h > 0) root.style.setProperty('--footer-h', h+'px');
+  };
+  const setSidebarW = () => {
+    const s = document.querySelector('.chat-sidebar');
+    if(!s) return;
+    const w = Math.ceil(s.getBoundingClientRect().width);
+    // Avoid writing zero width when hidden
+    if (w > 0) root.style.setProperty('--sidebar-w', w+'px');
+  };
+  const ro = new ResizeObserver(()=>{ setHeaderH(); setFooterH(); setSidebarW(); });
+  window.addEventListener('load', ()=>{ setHeaderH(); setFooterH(); setSidebarW(); });
+  const hdr = document.querySelector('.anag-header');
+  const ftr = document.querySelector('.chat-footer');
+  const sdb = document.querySelector('.chat-sidebar');
+  if(hdr) ro.observe(hdr);
+  if(ftr) ro.observe(ftr);
+  if(sdb) ro.observe(sdb);
+})();
+</script>
+<script id="textarea-autogrow">
+(function(){
+  const ta = document.getElementById('question');
+  if(!ta) return;
+  const grow = () => {
+    ta.style.height = 'auto';
+    const maxH = parseInt(getComputedStyle(ta).maxHeight, 10) || 144;
+    const newH = Math.min(ta.scrollHeight, maxH);
+    ta.style.height = newH + 'px';
+    ta.style.overflowY = (ta.scrollHeight > maxH) ? 'auto' : 'hidden';
+  };
+  ['input','change'].forEach(ev => ta.addEventListener(ev, grow));
+  // Grow once on load and when the form is focused (in case of autofill/history)
+  window.addEventListener('load', grow);
+  ta.addEventListener('focus', grow);
+})();
+</script>
+  </body>
+</html>

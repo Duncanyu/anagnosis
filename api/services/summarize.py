@@ -59,7 +59,7 @@ ASK_CITATION_NOTE = (os.getenv("ASK_CITATION_NOTE", "1").lower() in {"1","true",
 TEMPLATE = """You are a study assistant. Answer the question using ONLY the provided context.
 Start with a single bold sentence that directly answers the question. Then, if helpful, add short bullet points. Do not start the response with a bullet. Cite sources like [FileName.pdf p.3] or [FileName.pdf p.3–4].
 Important terms to anchor on: {terms}
-If none of the important terms appear in the context, still answer from the context you have.
+If the provided context does not contain enough information to answer the question, respond exactly: "I couldn't find relevant information in your documents." Do not invent facts.
 
 Question:
 {q}
@@ -197,18 +197,28 @@ def _target_doc_from_question(q, chs):
 def _scope_chunks(question, chs):
     if not chs:
         return chs
+    # Always preserve explicit memory chunks; scope only applies to document chunks
+    mem = [c for c in chs if c.get("is_memory")]
+    rest = [c for c in chs if not c.get("is_memory")]
+    if not rest:
+        return mem
     strict = os.getenv("ASK_STRICT_DOC", "1").lower() in {"1","true","yes","on"}
-    tgt = _target_doc_from_question(question, chs)
+    ql = (question or "").lower()
+    # If the user is comparing/relating across multiple items, relax strict scoping
+    if re.search(r"\b(both|the two|compare|comparison|relate|relation|versus|vs|between|contrast|another)\b", ql):
+        strict = False
+    tgt = _target_doc_from_question(question, rest)
     if not tgt:
-        tgt = _dominant_doc(chs)
+        tgt = _dominant_doc(rest)
     if not tgt:
-        return chs
+        return mem + rest
     if strict:
-        return [c for c in chs if _doc_name(c) == tgt] or chs
+        scoped = [c for c in rest if _doc_name(c) == tgt] or rest
+        return scoped + mem
     pri, sec = [], []
-    for c in chs:
+    for c in rest:
         (pri if _doc_name(c) == tgt else sec).append(c)
-    return pri + sec
+    return pri + sec + mem
 
 CHAPTER_RX = re.compile(r"\b(?:chapter|chap|ch)\s*([0-9]{1,3})\b", re.I)
 SECTION_RX = re.compile(r"\b(?:section|sec|§)\s*([0-9]+(?:\.[0-9]+)*)\b", re.I)
@@ -260,6 +270,9 @@ def _filter_by_chapter(question, chs, soft=True):
     prim, soft_pool = [], []
     pages = []
     for c in chs:
+        if c.get("is_memory"):
+            prim.append(c)
+            continue
         hp = (c.get("heading_path") or c.get("section_tag") or "").lower()
         ch, sec = _chapter_from_heading(hp)
         if ch_req and ch == ch_req:
@@ -764,24 +777,12 @@ def _ascii_ratio(s):
 def _filter_chunks(chs):
     out = []
     for c in chs:
-        t = _nfkc(c.get("text") or "").strip()
-        if not t:
+        if c.get("is_memory"):
+            # Keep memory chunks unless completely empty
+            t_mem = _nfkc(c.get("text") or "").strip()
+            if t_mem:
+                out.append(c)
             continue
-        if CJK_RE.search(t):
-            if _ascii_ratio(t) < 0.20:
-                continue
-        out.append(c)
-    return out
-
-def _ascii_ratio(s):
-    if not s:
-        return 0.0
-    n = sum(1 for ch in s if ord(ch) < 128)
-    return n / len(s)
-
-def _filter_chunks(chs):
-    out = []
-    for c in chs:
         t = _nfkc(c.get("text") or "").strip()
         if not t:
             continue
@@ -1005,8 +1006,13 @@ def _extract_quotes(question, chunks, max_quotes=5, window=1):
 def _filter_chunks(chs):
     out = []
     for c in chs:
-        t = c.get("text") or ""
-        t = _nfkc(t).strip()
+        # Always keep memory chunks (unless empty), even if they contain CJK
+        if c.get("is_memory"):
+            t_mem = _nfkc(c.get("text") or "").strip()
+            if t_mem:
+                out.append(c)
+            continue
+        t = _nfkc(c.get("text") or "").strip()
         if not t:
             continue
         if CJK_RE.search(t):
@@ -1187,7 +1193,11 @@ def summarize(question, top_chunks, history=None):
     prompt = TEMPLATE.format(q=question, ctx=ctx, terms=terms)
     if cfg.get("OPENAI_API_KEY"):
         prefs = _pref_string()
-        sysmsg = "You extract key ideas and cite pages. Return Markdown for prose; typeset all math in LaTeX using $...$ (inline) and $$...$$ (display)." + (" " + prefs if prefs else "")
+        sysmsg = (
+            "You extract key ideas and cite pages. Return Markdown for prose; typeset all math in LaTeX using $...$ (inline) and $$...$$ (display). "
+            "Use ONLY the provided context; if it is insufficient, reply exactly: I couldn't find relevant information in your documents. "
+            "Resolve pronouns and references (e.g., 'it', 'they', 'the two') using any Conversation memory blocks present in the Context."
+        ) + (" " + prefs if prefs else "")
         messages = [{"role": "system", "content": sysmsg}]
         if history:
             for turn in history[-8:]:
@@ -1206,7 +1216,10 @@ def summarize(question, top_chunks, history=None):
                     hist += f"\nUser: {turn['q']}\n"
                 if turn.get("a"):
                     hist += f"Assistant: {turn['a']}\n"
-        full = "System: You extract key ideas from the provided context only. Return Markdown for prose with citations like [FileName.pdf p.12]; typeset all math in LaTeX using $...$ / $$...$$." + hist + "\n" + prompt + "\nAssistant:"
+        full = (
+            "System: You extract key ideas from the provided context only. Return Markdown for prose with citations like [FileName.pdf p.12]; typeset all math in LaTeX using $...$ / $$...$$. "
+            "If the context is insufficient, reply exactly: I couldn't find relevant information in your documents."
+        ) + hist + "\n" + prompt + "\nAssistant:"
         text = _normalize_md(_hf_generate(full, max_new_tokens=700))
         text = _clean_math_citations(text)
     cites = []
@@ -1267,7 +1280,11 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
     batches = _batch_chunks(ordered, BATCH_CHAR_BUDGET)
     if cfg.get("OPENAI_API_KEY"):
         prefs = _pref_string()
-        sysmsg = "You extract key ideas and cite pages. Return Markdown for prose; typeset all math in LaTeX using $...$ (inline) and $$...$$ (display)." + (" " + prefs if prefs else "")
+        sysmsg = (
+            "You extract key ideas and cite pages. Return Markdown for prose; typeset all math in LaTeX using $...$ (inline) and $$...$$ (display). "
+            "Use ONLY the provided context; if it is insufficient, reply exactly: I couldn't find relevant information in your documents. "
+            "Resolve pronouns and references (e.g., 'it', 'they', 'the two') using any Conversation memory blocks present in the Context."
+        ) + (" " + prefs if prefs else "")
         hist_msgs = []
         if history:
             for turn in history[-4:]:
@@ -1347,7 +1364,10 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
                         hist += f"\nUser: {turn['q']}\n"
                     if turn.get("a"):
                         hist += f"Assistant: {turn['a']}\n"
-            full = "System: You extract key ideas from the provided context only. Return Markdown for prose with citations like [FileName.pdf p.12]; typeset all math in LaTeX using $...$ / $$...$$." + hist + "\n" + prompt + "\nAssistant:"
+            full = (
+                "System: You extract key ideas from the provided context only. Return Markdown for prose with citations like [FileName.pdf p.12]; typeset all math in LaTeX using $...$ / $$...$$. "
+                "If the context is insufficient, reply exactly: I couldn't find relevant information in your documents."
+            ) + hist + "\n" + prompt + "\nAssistant:"
             ans = _normalize_md(_hf_generate(full, max_new_tokens=600))
             parts.append(ans)
             prev = set(seen_sources)
