@@ -774,7 +774,6 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
               <section class="settings-card">
                 <h3>API keys</h3>
                 <div class="field"><label for="openai-key">OpenAI API key</label><input type="password" id="openai-key" placeholder="sk-…" /></div>
-                <div class="field"><label for="hf-token">HuggingFace token</label><input type="password" id="hf-token" placeholder="hf_…" /></div>
                 <div class="field"><label for="serp-key">SerpAPI key</label><input type="password" id="serp-key" placeholder="..." /></div>
                 <div class="field"><label for="brave-key">Brave API key</label><input type="password" id="brave-key" placeholder="BSA_" /></div>
                 <div class="field"><label for="web-provider">Web search provider</label>
@@ -788,21 +787,13 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
               </section>
 
               <section class="settings-card">
-                <h3>Backends & models</h3>
-                <div class="field"><label for="embed-backend">Embedding backend</label>
+                <h3>LLM Provider</h3>
+                <div class="field"><label for="embed-backend">Provider</label>
                   <select id="embed-backend">
                     <option value="hf" {% if defaults['EMBED_BACKEND']=='hf' %}selected{% endif %}>HF</option>
                     <option value="openai" {% if defaults['EMBED_BACKEND']=='openai' %}selected{% endif %}>OpenAI</option>
                   </select>
                 </div>
-                <div class="field"><label for="llm-backend">LLM backend</label>
-                  <select id="llm-backend">
-                    <option value="openai" {% if defaults['LLM_BACKEND']=='openai' %}selected{% endif %}>OpenAI</option>
-                    <option value="vllm" {% if defaults['LLM_BACKEND']=='vllm' %}selected{% endif %}>vLLM</option>
-                  </select>
-                </div>
-                <div class="field"><label for="openai-model">OpenAI chat model</label><input type="text" id="openai-model" value="{{ defaults['OPENAI_CHAT_MODEL'] }}" /></div>
-                <div class="field"><label for="hf-model">HF LLM name</label><input type="text" id="hf-model" value="{{ defaults['HF_LLM_NAME'] }}" /></div>
               </section>
 
               <section class="settings-card">

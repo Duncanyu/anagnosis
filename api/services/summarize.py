@@ -1390,15 +1390,15 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
         prefs = _pref_string()
         nf_clause = ("If the context is insufficient, reply exactly: I couldn't find relevant information in your documents. " if allow_not_found else "")
         sysmsg = (
-            "You extract key ideas and cite pages. Return Markdown for prose; typeset all math in LaTeX using $...$ (inline) and $$...$$ (display). "
+            "You extract key ideas and cite pages. "
             + nf_clause +
-            "Resolve pronouns and references (e.g., 'it', 'they', 'the two') using any Conversation memory blocks present in the Context. "
+            "Respect conversational context: resolve pronouns and follow‑ups (e.g., 'it', 'they', 'the two', named people) using the most recent Conversation memory in Context; do not switch topics. "
             + (" STRICT EXTRACTIVE MODE: copy or minimally paraphrase; do not add content beyond the context. " if strict_docs else "")
-            + "Be thorough and structured: include short section headings and clear bullet lists; aim for a detailed answer (≈180–350 words) unless asked for brevity."
+            + "Write a clear, professional answer with short headings and concise bullets when helpful."
         ) + (" " + prefs if prefs else "")
         hist_msgs = []
         if history:
-            for turn in history[-4:]:
+            for turn in history[-8:]:
                 if turn.get("q"):
                     hist_msgs.append({"role": "user", "content": turn["q"]})
                 if turn.get("a"):
@@ -1462,7 +1462,7 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
         fuse_ctx = "\n\n---\n\n".join(parts)[:40000]
         fuse_prompt = "You are consolidating multiple partial answers derived strictly from course readings. Merge them into a single, non-redundant answer. Keep formulas, be precise, and keep citations from the partials in place.\n\nQuestion:\n" + question + "\n\nPartials:\n" + fuse_ctx
         final, _ = _openai_chat([
-            {"role": "system", "content": "Return a single clean Markdown answer (keep citations as-is) and typeset all math in LaTeX using $...$ / $$...$$. Be comprehensive and structured with short headings and bullet lists; aim for a detailed answer (≈180–350 words)."},
+            {"role": "system", "content": "Merge the partials into one clear, professional answer (keep citations as-is). Use short headings and concise bullets when helpful."},
             {"role": "user", "content": fuse_prompt}
         ], max_new_tokens=800)
         final = _clean_math_citations(final)
@@ -1486,7 +1486,7 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
             prompt = _build_template(allow_not_found).format(q=question, ctx=ctx, terms=", ".join(_keywords(question)))
             hist = ""
             if history:
-                for turn in history[-4:]:
+                for turn in history[-8:]:
                     if turn.get("q"):
                         hist += f"\nUser: {turn['q']}\n"
                     if turn.get("a"):
@@ -1494,9 +1494,9 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
             citeline = "with citations like [FileName.pdf p.12]; " if ASK_INLINE_CITATIONS else ""
             nf_clause = ("If the context is insufficient, reply exactly: I couldn't find relevant information in your documents. " if allow_not_found else "")
             full = (
-                f"System: You extract key ideas from the provided context only. Return Markdown for prose {citeline}typeset all math in LaTeX using $...$ / $$...$$. "
+                f"System: You extract key ideas from the provided context only {citeline}" 
                 + nf_clause +
-                "Resolve pronouns using Conversation memory, but never cite Conversation memory or Long‑term memory — cite only document sources." \
+                " Respect conversational context: resolve pronouns and follow‑ups using Conversation memory; never cite Conversation memory or Long‑term memory — cite only document sources."
                 + (" STRICT EXTRACTIVE MODE: copy or minimally paraphrase; do not add content beyond the context." if strict_docs else "")
             ) + hist + "\n" + prompt + "\nAssistant:"
             ans = _normalize_md(_hf_generate(full, max_new_tokens=600))
@@ -1513,7 +1513,7 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
             return summarize(question, ordered[:max(1, min(6, len(ordered)))], history=history, strict_docs=strict_docs, orig_question=orig_question)
         fuse_ctx = "\n\n---\n\n".join(parts)[:40000]
         fuse_prompt = "You are consolidating multiple partial answers derived strictly from course readings. Merge them into a single, non-redundant answer. Keep formulas and be precise." + (" Preserve citations from the partials." if ASK_INLINE_CITATIONS else "") + "\n\nQuestion:\n" + question + "\n\nPartials:\n" + fuse_ctx
-        sys_fuse = "System: Consolidate the partials into one Markdown answer; typeset all math in LaTeX using $...$ / $$...$$." + (" Preserve citations." if ASK_INLINE_CITATIONS else "")
+        sys_fuse = "System: Consolidate the partials into one coherent answer. Keep it structured and precise." + (" Preserve citations." if ASK_INLINE_CITATIONS else "")
         final = _normalize_md(_hf_generate(sys_fuse + "\n" + fuse_prompt + "\nAssistant:", max_new_tokens=800))
         final = _clean_math_citations(final)
     cites = []
@@ -1569,13 +1569,13 @@ def summarize_document(chunks):
         msg = client.chat.completions.create(
             model=_openai_model(),
             messages=[
-                {"role": "system", "content": "Return structured, factual notes with page citations in Markdown."},
+                {"role": "system", "content": "Return structured, factual notes with page citations."},
                 {"role": "user", "content": prompt},
             ],
         )
         summary = _normalize_md(msg.choices[0].message.content)
     else:
-        full = "System: Produce a comprehensive study summary in Markdown with bullets and citations like [FileName.pdf p.12].\n" + DOC_TEMPLATE.format(ctx=ctx) + "\nAssistant:"
+        full = "System: Produce a comprehensive study summary with bullets and citations like [FileName.pdf p.12].\n" + DOC_TEMPLATE.format(ctx=ctx) + "\nAssistant:"
         summary = _normalize_md(_hf_generate(full, max_new_tokens=1200))
     SUMMARIES_PATH.parent.mkdir(parents=True, exist_ok=True)
     with SUMMARIES_PATH.open("a", encoding="utf-8") as f:

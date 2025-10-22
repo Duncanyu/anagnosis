@@ -199,23 +199,20 @@ def answer_question(
     # Keep the original user phrasing for final rendering
     _orig_user_q = question
 
-    base_prefix = (
-        "Write normal text and structure in Markdown. "
-        "Typeset ALL mathematical expressions in LaTeX: use $...$ for inline and $$...$$ for display. "
-        "Do NOT wrap plain prose in \\text{...}. "
-        "Use standard LaTeX commands (\\frac, \\sqrt, ^, _). "
-        "Preserve citations as plain text.\n"
+    # Build formatting prefix conservatively — never mention LaTeX or Markdown in the answer.
+    plain_prefix = (
+        "Answer clearly and concisely in plain text. "
+        "Do not discuss formatting, Markdown, or LaTeX. "
+        "Preserve citations as plain text when applicable.\n"
     )
-    if formula_mode:
-        fmt_prefix = (
-            base_prefix
-            + "\nWhen listing formulas, format EACH item on ONE line exactly as: "
-            + "<label/meaning> — $$ <LaTeX formula> $$ [FileName.pdf p.N] — <1–2 sentence explanation>. "
-            + "Put the citation AFTER the formula (not inside the math). "
-            + "Do not use bullets. Do not place citations or explanation inside $...$ or $$...$$. Keep explanations concise and factual.\n\n"
+    fmt_prefix = plain_prefix + "\n"
+    # If formula mode or math-y question, add concise one-line formula list instruction without LaTeX mention
+    if formula_mode or is_formula_query(question):
+        fmt_prefix += (
+            "When listing formulas, format EACH item on ONE line exactly as: "
+            "<label/meaning> — <formula> [FileName.pdf p.N] — <1–2 sentence explanation>. "
+            "Put the citation AFTER the formula. Keep explanations concise and factual.\n\n"
         )
-    else:
-        fmt_prefix = base_prefix + "\n"
     fmt_q = fmt_prefix + question
 
     history = list(history or [])
@@ -300,6 +297,31 @@ def answer_question(
 
     rel_score, rel_meta = agent.estimate_relevance(question)
     _emit(progress, f"Relevance score: {rel_score if rel_score is not None else 'n/a'}")
+    # If OpenAI is not configured, degrade advanced features to reduce costs and encourage OpenAI usage
+    try:
+        from api.core.config import load_config as _cfg
+        __cfg = _cfg() or {}
+        has_openai = bool(__cfg.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY"))
+    except Exception:
+        has_openai = bool(os.environ.get("OPENAI_API_KEY"))
+    if not has_openai:
+        if web_enabled:
+            _emit(progress, "Web search disabled (OpenAI key not set).")
+        web_enabled = False
+        agents_enabled = False
+        # Shorten time budgets for local generation
+        try:
+            tb = min(tb, int(os.environ.get("ASK_TIME_BUDGET_SEC_HF", "80")))
+        except Exception:
+            pass
+    # If RAG-only (strict_docs) is requested and relevance is low, avoid LaTeX guidance entirely
+    try:
+        strict_min = float(os.getenv("ASK_STRICT_MIN_RELEVANCE", "0.15"))
+    except Exception:
+        strict_min = 0.15
+    if strict_docs and (rel_score is not None) and (rel_score < strict_min):
+        fmt_prefix = plain_prefix + "\n"
+        fmt_q = fmt_prefix + question
     # Decide if we should also include local RAG when web is enabled.
     # Use the same LLM judge logic as strict mode, but as a gate (lenient in that any >0/Relevant passes).
     lenient_th = float(os.getenv("ASK_WEB_LENIENT_MIN", "0.05"))
@@ -567,7 +589,7 @@ def answer_question(
                     "page_end": idx,
                     "section_tag": "memory",
                     "is_memory": True,
-                    "_score": 0.55,
+                    "_score": 0.90,
                 }
             )
 
@@ -608,14 +630,17 @@ def answer_question(
                     "page_end": j,
                     "section_tag": "memory",
                     "is_memory": True,
-                    "_score": 0.50,
+                    "_score": 0.85,
                 }
             )
     except Exception:
         # Memory is best-effort; ignore failures
         pass
-    if mem_chunks and not strict_docs:
-        top_chunks.extend(mem_chunks)
+    if mem_chunks:
+        try:
+            top_chunks = list(mem_chunks) + list(top_chunks or [])
+        except Exception:
+            top_chunks = list(mem_chunks)
 
     # Start with whatever we have so far; refine per mode below
     combined_hits = list(hits) if hits else []
@@ -632,8 +657,8 @@ def answer_question(
         base_hits = list(hits) if include_rag else []
         web_extras = web_hits if web_hits else [(0.85, c) for c in web_chunks]
         combined_hits = base_hits + web_extras
-    if mem_chunks and not strict_docs:
-        combined_hits.extend([(0.55, ch) for ch in mem_chunks])
+    if mem_chunks:
+        combined_hits.extend([(0.80, ch) for ch in mem_chunks])
 
     if formula_mode:
         _check_cancel(should_cancel)

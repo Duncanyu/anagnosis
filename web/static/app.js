@@ -545,10 +545,7 @@ function applyDefaults(defaults) {
   if (rerankerEl) rerankerEl.value = defaults.ASK_RERANKER || 'off';
   setChecked('exhaustive', defaults.ASK_EXHAUSTIVE);
 
-  setValue('openai-model', defaults.OPENAI_CHAT_MODEL);
-  setValue('hf-model', defaults.HF_LLM_NAME);
   setValue('embed-backend', defaults.EMBED_BACKEND);
-  setValue('llm-backend', defaults.LLM_BACKEND);
   setChecked('settings-memory', defaults.MEMORY_ENABLED);
   setValue('memory-tokens', defaults.MEMORY_TOKEN_LIMIT);
   setValue('memory-file-mb', defaults.MEMORY_FILE_LIMIT_MB);
@@ -2048,13 +2045,9 @@ function collectSettingsPayload() {
   const getEl = (id) => document.getElementById(id);
   return {
     openai_key: getEl('openai-key')?.value || '',
-    hf_token: getEl('hf-token')?.value || '',
     serp_key: getEl('serp-key')?.value || '',
     brave_key: getEl('brave-key')?.value || '',
-    openai_model: getEl('openai-model')?.value || '',
-    hf_model: getEl('hf-model')?.value || '',
     embed_backend: getEl('embed-backend')?.value || 'hf',
-    llm_backend: getEl('llm-backend')?.value || 'openai',
     memory_enabled: Boolean(getEl('settings-memory')?.checked),
     memory_tokens: Number(getEl('memory-tokens')?.value || 1200),
     memory_file_mb: Number(getEl('memory-file-mb')?.value || 50),
@@ -2138,7 +2131,6 @@ function renderKeyStatus(keys) {
   const parts = [];
   const order = [
     ['openai','OpenAI'],
-    ['hf','HF'],
     ['serpapi','SerpAPI'],
     ['brave','Brave'],
   ];
@@ -2167,6 +2159,21 @@ async function refreshSettingsStatus() {
     if (keyStatusEl && data.keys) {
       keyStatusEl.innerHTML = renderKeyStatus(data.keys);
     }
+    // Disable controls that require OpenAI if key is missing (do not hide)
+    try {
+      const ok = data && data.keys && data.keys.openai;
+      const openaiPresent = !!(ok && ok.present);
+      const webToggle = document.getElementById('web-enabled');
+      if (webToggle) {
+        webToggle.disabled = !openaiPresent;
+        webToggle.title = openaiPresent ? '' : 'Requires OpenAI API key';
+      }
+      const providerSelect = document.getElementById('web-provider');
+      if (providerSelect) {
+        providerSelect.disabled = !openaiPresent;
+        providerSelect.title = openaiPresent ? '' : 'Requires OpenAI API key';
+      }
+    } catch {}
   } catch (err) {
     console.warn('Failed to refresh settings', err);
     showError(err);
