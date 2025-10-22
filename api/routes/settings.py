@@ -114,14 +114,12 @@ def _settings_defaults_for_user(user_id: str) -> Dict[str, Any]:
         return secrets.get(key) or global_cfg.get(key) or default
     return {
         "OPENAI_API_KEY": pick("OPENAI_API_KEY", ""),
-        "HF_TOKEN": pick("HF_TOKEN", ""),
         "SERPAPI_KEY": pick("SERPAPI_KEY", ""),
         "BRAVE_API_KEY": pick("BRAVE_API_KEY", ""),
         "WEB_SEARCH_PROVIDER": (secrets.get("WEB_SEARCH_PROVIDER") or env.get("WEB_SEARCH_PROVIDER") or "auto").lower(),
         "OPENAI_CHAT_MODEL": secrets.get("OPENAI_CHAT_MODEL") or env.get("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
-        "HF_LLM_NAME": secrets.get("HF_LLM_NAME") or env.get("HF_LLM_NAME", "TinyLlama/TinyLlama-1.1B-Chat-v1.0"),
         "EMBED_BACKEND": secrets.get("EMBED_BACKEND") or "hf",
-        "LLM_BACKEND": secrets.get("LLM_BACKEND") or "openai",
+        "LLM_BACKEND": "openai",
         "MEMORY_ENABLED": _bool(prefs.get("MEMORY_ENABLED") or env.get("MEMORY_ENABLED", "false")),
         "MEMORY_TOKEN_LIMIT": int(prefs.get("MEMORY_TOKEN_LIMIT") or env.get("MEMORY_TOKEN_LIMIT", "1200")),
         "MEMORY_FILE_LIMIT_MB": int(prefs.get("MEMORY_FILE_LIMIT_MB") or env.get("MEMORY_FILE_LIMIT_MB", "50")),
@@ -231,14 +229,12 @@ def user_key_status(user_id: str, verify: bool = False, defaults: Optional[Dict[
 
     required = {
         "openai": (llm_backend == "openai") or (embed_backend == "openai"),
-        "hf": (llm_backend == "vllm") or (embed_backend == "hf"),
         "serpapi": (web_provider == "serpapi"),
         "brave": (web_provider == "brave"),
     }
 
     present = {
         "openai": bool(s.get("OPENAI_API_KEY")),
-        "hf": bool(s.get("HF_TOKEN")),
         "serpapi": bool(s.get("SERPAPI_KEY")),
         "brave": bool(s.get("BRAVE_API_KEY")),
     }
@@ -248,7 +244,6 @@ def user_key_status(user_id: str, verify: bool = False, defaults: Optional[Dict[
 
     ok = {
         "openai": _verify_openai_key(str(s.get("OPENAI_API_KEY") or "")),
-        "hf": _verify_hf_token(str(s.get("HF_TOKEN") or "")),
         "serpapi": _verify_serpapi_key(str(s.get("SERPAPI_KEY") or "")),
         "brave": _verify_brave_key(str(s.get("BRAVE_API_KEY") or "")),
     }
@@ -260,16 +255,13 @@ def _save_settings_for_user(user_id: str, payload: Dict[str, Any]) -> str:
         secrets = read_user_secrets(user_id)
         if payload.get("openai_key", "").strip():
             secrets["OPENAI_API_KEY"] = payload["openai_key"].strip()
-        if payload.get("hf_token", "").strip():
-            secrets["HF_TOKEN"] = payload["hf_token"].strip()
         if payload.get("serp_key", "").strip():
             secrets["SERPAPI_KEY"] = payload["serp_key"].strip()
         if payload.get("brave_key", "").strip():
             secrets["BRAVE_API_KEY"] = payload["brave_key"].strip()
         secrets["OPENAI_CHAT_MODEL"] = (payload.get("openai_model", "gpt-4o-mini").strip() or "gpt-4o-mini")
-        secrets["HF_LLM_NAME"] = (payload.get("hf_model", "TinyLlama/TinyLlama-1.1B-Chat-v1.0").strip() or "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
         secrets["EMBED_BACKEND"] = (payload.get("embed_backend") or "hf").lower()
-        secrets["LLM_BACKEND"] = (payload.get("llm_backend") or "openai").lower()
+        secrets["LLM_BACKEND"] = "openai"
         if (payload.get("web_provider") or "").strip():
             secrets["WEB_SEARCH_PROVIDER"] = (payload.get("web_provider") or "auto").strip().lower()
         write_user_secrets(user_id, secrets)
@@ -321,17 +313,18 @@ def apply_env_for_user(user_id: str):
     defaults = _settings_defaults_for_user(user_id)
     touched = {}
     keys = [
-        "OPENAI_CHAT_MODEL","HF_LLM_NAME","EMBED_BACKEND","LLM_BACKEND",
+        "OPENAI_CHAT_MODEL","EMBED_BACKEND","LLM_BACKEND",
         "MEMORY_ENABLED","MEMORY_TOKEN_LIMIT","MEMORY_FILE_LIMIT_MB",
         "OPENAI_TPM","OPENAI_RPM","ASK_BATCH_CHAR_BUDGET","ASK_MAX_BATCHES",
         "ASK_TIME_BUDGET_SEC","ASK_EXHAUSTIVE","ASK_RERANKER","ASK_CANDIDATES","WEB_SEARCH_PROVIDER",
-        "OPENAI_API_KEY","HF_TOKEN","SERPAPI_KEY","BRAVE_API_KEY",
+        "OPENAI_API_KEY","SERPAPI_KEY","BRAVE_API_KEY",
     ]
     for k in keys:
         if k in os.environ:
             touched[k] = os.environ[k]
     os.environ["OPENAI_CHAT_MODEL"] = str(defaults.get("OPENAI_CHAT_MODEL") or "gpt-4o-mini")
-    os.environ["HF_LLM_NAME"] = str(defaults.get("HF_LLM_NAME") or "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+    # Fixed HF model selection for fallback
+    os.environ["HF_LLM_NAME"] = str(os.environ.get("HF_LLM_NAME") or "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
     os.environ["EMBED_BACKEND"] = str(defaults.get("EMBED_BACKEND") or "hf")
     os.environ["LLM_BACKEND"] = str(defaults.get("LLM_BACKEND") or "openai")
     for k in ("MEMORY_ENABLED","ASK_EXHAUSTIVE"):
@@ -341,7 +334,7 @@ def apply_env_for_user(user_id: str):
         "ASK_BATCH_CHAR_BUDGET","ASK_MAX_BATCHES","ASK_TIME_BUDGET_SEC","ASK_CANDIDATES",
     ):
         os.environ[k] = str(defaults.get(k))
-    for k in ("OPENAI_API_KEY","HF_TOKEN","SERPAPI_KEY","BRAVE_API_KEY"):
+    for k in ("OPENAI_API_KEY","SERPAPI_KEY","BRAVE_API_KEY"):
         v = defaults.get(k)
         if v:
             os.environ[k] = str(v)

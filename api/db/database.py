@@ -5,6 +5,11 @@ from sqlalchemy.orm import sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# Allow forcing SQLite for local single-process runs where a Docker-only
+# DATABASE_URL might be present in the environment.
+if os.getenv("FORCE_SQLITE", "").strip().lower() in {"1", "true", "yes", "on"}:
+    DATABASE_URL = None
+
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 

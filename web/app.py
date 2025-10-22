@@ -45,17 +45,12 @@ templates = Jinja2Templates(directory=str(ROOT / "web" / "templates"))
 app.mount("/static", StaticFiles(directory=str(ROOT / "web" / "static")), name="static")
 app.mount("/assets", StaticFiles(directory=str(ROOT / "assets")), name="assets")
 
-# Internal API base for server-side calls (auth check, etc.)
-# Prefer explicit env; fallback to docker service DNS if inside a container; else localhost
-def _detect_in_docker() -> bool:
-    try:
-        return pathlib.Path('/.dockerenv').exists()
-    except Exception:
-        return False
-
-API_INTERNAL_BASE = os.environ.get("API_INTERNAL_BASE") or (
-    "http://api:8000" if _detect_in_docker() else "http://localhost:8000"
+# For auth, prefer direct in-process check via the API auth utilities.
+from api.auth.middleware import (
+    get_current_user as _api_get_current_user,
+    is_dev_user as _api_is_dev_user,
 )
+from api.db.database import SessionLocal
 
 def _setup_logging():
     level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -1000,23 +995,19 @@ def _start_ask_job(payload: Dict[str, Any]) -> str:
     return job_id
 
 async def get_current_user(request: Request):
-    """Check if user is authenticated via cookie."""
+    """Resolve current user from the JWT cookie without network calls."""
     try:
-        token = request.cookies.get("access_token")
-        if not token:
-            return None
-        import httpx
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{API_INTERNAL_BASE}/api/auth/check",
-                cookies={"access_token": token},
-                timeout=5.0,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("authenticated"):
-                    return data.get("user")
-        return None
+        db = SessionLocal()
+        try:
+            u = _api_get_current_user(request, db)
+            if not u:
+                return None
+            return {"id": str(u.id), "email": u.email, "is_dev": bool(_api_is_dev_user(u))}
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
     except Exception as e:
         print(f"Auth check error: {e}")
         return None
@@ -1067,7 +1058,8 @@ async def _log_requests(request: Request, call_next):
     if not any(path.startswith(p) for p in SKIP_LOG_PREFIXES):
         dt_ms = int((time.perf_counter() - t0) * 1000)
         try:
-            logging.getLogger("uvicorn.access").info("%s %s %d %dms", request.method, path, resp.status_code, dt_ms)
+            # Use a regular app logger to avoid uvicorn's AccessFormatter tuple expectations
+            logging.getLogger("anagnosis.web").info("%s %s %s %dms", request.method, path, getattr(resp, "status_code", "-"), dt_ms)
         except Exception:
             pass
     return resp

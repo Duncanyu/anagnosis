@@ -81,3 +81,33 @@ Notes
 - These scripts avoid Docker Compose and default to SQLite (`./anagnosis.db`).
 - To use Postgres locally instead, run the API with `USE_SQLITE=0` and set `DATABASE_URL` (e.g., `postgresql+psycopg2://user:pass@localhost:5432/db`).
 - The `.env` file is intended for Docker Compose. It is not automatically loaded for local runs.
+
+---
+
+## Single Command Deploy (Render)
+
+This repository now includes a unified ASGI entrypoint that serves both the API and the Web UI from a single process.
+
+- Entry file: `serve.py`
+- ASGI app: `serve:app`
+
+On Render, create a Web Service pointing at this repo and set:
+
+- Build Command: `pip install -r requirements.txt`
+- Start Command: `uvicorn serve:app --host 0.0.0.0 --port $PORT`
+
+Environment
+- Optional: set `DATABASE_URL` for Postgres; otherwise it defaults to a local SQLite file (`./anagnosis.db`).
+- Optional: set `OPENAI_API_KEY`, `HF_TOKEN`, etc., per your configuration needs.
+
+Local single-process run
+- Use a port other than `7860` so the frontend uses same-origin `/api`:
+  - `uvicorn serve:app --host 0.0.0.0 --port 8080`
+  - Open `http://localhost:8080`
+- If you use port `7860`, the frontend will try to call an API on `:8000` (intended for two-process dev). Either run the API separately on 8000 or choose a different port as above.
+
+If you see a Postgres connection error locally
+- Your shell may have `DATABASE_URL` set to a Docker-only hostname like `postgres` from a previous `docker-compose` run.
+- Quick fix: force SQLite for local runs by prefixing the command:
+  - `FORCE_SQLITE=1 uvicorn serve:app --host 0.0.0.0 --port 8080`
+- Or unset `DATABASE_URL` in your shell so the app falls back to SQLite (`sqlite:///./anagnosis.db`).
