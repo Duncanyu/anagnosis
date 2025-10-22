@@ -54,19 +54,36 @@ FORMULA_MIN_FORMULA_RATIO = float(os.getenv("FORMULA_MIN_FORMULA_RATIO", "0.25")
 FORMULA_MIN_KEEP_PER_PAGE = int(os.getenv("FORMULA_MIN_KEEP_PER_PAGE","3"))
 FORMULA_STRONG_DENS = float(os.getenv("FORMULA_STRONG_DENS","0.55"))
 ASK_FORMULA_DEBUG = (os.getenv("ASK_FORMULA_DEBUG", "1").lower() in {"1","true","yes","on"})
-ASK_CITATION_NOTE = (os.getenv("ASK_CITATION_NOTE", "1").lower() in {"1","true","yes","on"})
+ASK_CITATION_NOTE = (os.getenv("ASK_CITATION_NOTE", "0").lower() in {"1","true","yes","on"})
+# Inline citation control: when off, we won't instruct the LLM to add [Doc p.N] markers
+ASK_INLINE_CITATIONS = (os.getenv("ASK_INLINE_CITATIONS", "1").lower() in {"1","true","yes","on"})
 
-TEMPLATE = """You are a study assistant. Answer the question using ONLY the provided context.
-Start with a single bold sentence that directly answers the question. Then, if helpful, add short bullet points. Do not start the response with a bullet. Cite sources like [FileName.pdf p.3] or [FileName.pdf p.3–4].
-Important terms to anchor on: {terms}
-If the provided context does not contain enough information to answer the question, respond exactly: "I couldn't find relevant information in your documents." Do not invent facts.
+def _template_body(inline_cite: bool, allow_not_found: bool = True) -> str:
+    cite_line = (
+        "Cite sources like [FileName.pdf p.3] or [FileName.pdf p.3–4].\n"
+        if inline_cite else ""
+    )
+    nf_line = (
+        "If the provided context is insufficient to answer, begin with a bold line: **No directly relevant passage found.** "
+        "Then, if the question invites general analysis (e.g., comparisons, strengths/weaknesses, trade‑offs), add a short, clearly labeled \n"
+        "**General perspective** section (2–4 bullets) using general knowledge — do not cite documents in that section. \n"
+        "Finally, add one or two short bullets with next steps (e.g., broaden to all documents, enable Web search, clarify or upload relevant pages).\n\n"
+        if allow_not_found else ""
+    )
+    return (
+        "You are a study assistant. Answer the question using ONLY the provided context.\n"
+        "Start with a single bold sentence that directly answers the question. Then, if helpful, add short bullet points. Do not start the response with a bullet.\n"
+        + cite_line +
+        "Important terms to anchor on: {terms}\n"
+        + nf_line +
+        "Use Conversation memory blocks only to resolve pronouns and maintain continuity; do NOT cite Conversation memory or Long‑term memory as sources. Citations must come from actual documents.\n\n"
+        "Question:\n{q}\n\nContext:\n{ctx}\n"
+    )
 
-Question:
-{q}
+TEMPLATE = _template_body(ASK_INLINE_CITATIONS, allow_not_found=True)
 
-Context:
-{ctx}
-"""
+def _build_template(allow_not_found: bool) -> str:
+    return _template_body(ASK_INLINE_CITATIONS, allow_not_found)
 
 DOC_TEMPLATE = """You are a rigorous study assistant for university readings.
 Return a comprehensive summary in Markdown with these sections:
@@ -112,7 +129,11 @@ MMR_ALPHA = float(os.getenv("ASK_MMR_ALPHA", "0.7"))
 MMR_ENABLE = (os.getenv("ASK_MMR_ENABLE", "1").lower() in {"1","true","yes","on"})
 ASK_EXHAUSTIVE_DEFAULT = (os.getenv("ASK_EXHAUSTIVE","0").lower() in {"1","true","yes","on"})
 ASK_CANDIDATES_DEFAULT = int(os.getenv("ASK_CANDIDATES","300"))
-RERANKER_NAME_DEFAULT = os.getenv("ASK_RERANKER","off").lower()
+def _current_reranker_name():
+    try:
+        return os.getenv("ASK_RERANKER","off").lower()
+    except Exception:
+        return "off"
 RERANK_TOP_N = int(os.getenv("ASK_RERANK_TOP_N","200"))
 ASK_RERANK_IN_FORMULA = (os.getenv("ASK_RERANK_IN_FORMULA","1").lower() in {"1","true","yes","on"})
 FORMULA_EXHAUSTIVE = (os.getenv("FORMULA_EXHAUSTIVE", "1").lower() in {"1","true","yes","on"})
@@ -481,6 +502,28 @@ def _clean_math_citations(text: str) -> str:
     text = re.sub(r"(\$\$|\$)(\s*)(\[[^\]]+\])", r"\1 \3", text)
     return text
 
+_CITE_DOC_RX = re.compile(r"\[\s*([^\]\n]+?)\s+p\s*\.")
+
+def _strip_unknown_citations(text: str, allowed_docs: set[str]) -> str:
+    """Remove bracket citations that reference docs outside allowed_docs.
+
+    allowed_docs should contain base filenames (e.g., 'MyFile.pdf').
+    """
+    if not text:
+        return text
+    if not allowed_docs:
+        return text
+    def _repl(m: re.Match):
+        doc = (m.group(1) or "").strip()
+        base = doc
+        try:
+            import pathlib as _p
+            base = _p.Path(doc).name
+        except Exception:
+            pass
+        return m.group(0) if base in allowed_docs else ""
+    return _CITE_DOC_RX.sub(_repl, text)
+
 _def_label_before_math = re.compile(r"(?m)^(?P<label>[^$\n].+?)\n(?P<math>\s*\$\$[\s\S]*?\$\$)\s*(?P<cite>\[[^\]]+\])?\s*$")
 _def_tight_citation   = re.compile(r"(?m)(\$\$[\s\S]*?\$\$)\s*(\[[^\]]+\])")
 
@@ -732,11 +775,24 @@ def summarize_all_formulas(question, chunks, progress_cb=None, exhaustive=None, 
             pass
     if ASK_RERANK_IN_FORMULA:
         try:
-            use_name = RERANKER_NAME_DEFAULT if RERANKER_NAME_DEFAULT not in {"", "off", "none"} else "minilm"
-            rer_idx = _rerank(question, ordered, name=use_name, top_n=RERANK_TOP_N)
-            ordered = [ordered[i] for i in rer_idx]
+            cur = _current_reranker_name()
+            if cur not in {"", "off", "none"}:
+                if progress_cb:
+                    try: progress_cb(f"Reranker (formula): {cur}…")
+                    except Exception: pass
+                rer_idx = _rerank(question, ordered, name=cur, top_n=RERANK_TOP_N)
+                ordered = [ordered[i] for i in rer_idx]
+                if progress_cb:
+                    try: progress_cb("Reranker (formula): done")
+                    except Exception: pass
+            else:
+                if progress_cb:
+                    try: progress_cb("Reranker (formula): off")
+                    except Exception: pass
         except Exception:
-            pass
+            if progress_cb:
+                try: progress_cb("Reranker (formula): skipped (error)")
+                except Exception: pass
     ask = (question or "").lower()
     wants_explain = any(k in ask for k in ("explain","why","derive","derivation","proof","prove","show"))
     rows, diag = extract_formulas_from_chunks(ordered, progress_cb=progress_cb, time_budget_sec=tb, wants_explain=wants_explain, exhaustive_scan=exhaustive)
@@ -829,7 +885,9 @@ def _load_cross_encoder(tag):
         return None, None
 
 
-def _rerank(question, chs, name=RERANKER_NAME_DEFAULT, top_n=RERANK_TOP_N):
+def _rerank(question, chs, name=None, top_n=RERANK_TOP_N):
+    if name is None:
+        name = _current_reranker_name()
     tag = (name or "off").lower().strip()
     if tag in {"off", "none", ""}:
         return list(range(len(chs)))
@@ -1087,7 +1145,10 @@ def _rate_limit(tokens):
 
 def _openai_chat(messages, max_new_tokens=800):
     from openai import OpenAI
-    client = OpenAI(api_key=(load_config().get("OPENAI_API_KEY")))
+    import os
+    cfg = load_config() or {}
+    key = cfg.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    client = OpenAI(api_key=key)
     s = "\n".join(m.get("content","") for m in messages)
     need = _estimate_tokens(s) + max_new_tokens
     _rate_limit(need)
@@ -1180,7 +1241,7 @@ def _batch_chunks(chs, budget_chars):
         out.append(cur)
     return out
 
-def summarize(question, top_chunks, history=None):
+def summarize(question, top_chunks, history=None, *, allow_not_found: bool = True, **kwargs):
     cfg = load_config()
     scoped = _scope_chunks(question, top_chunks)
     scoped = _filter_by_chapter(question, scoped)
@@ -1190,13 +1251,17 @@ def summarize(question, top_chunks, history=None):
         return {"answer": "Not found in sources.", "citations": [], "quotes": []}
     terms = ", ".join(_keywords(question))
     ctx = _format_ctx(used)
-    prompt = TEMPLATE.format(q=question, ctx=ctx, terms=terms)
+    prompt = _build_template(allow_not_found).format(q=question, ctx=ctx, terms=terms)
     if cfg.get("OPENAI_API_KEY"):
         prefs = _pref_string()
+        cite_clause = "cite pages and " if ASK_INLINE_CITATIONS else ""
+        nf_clause = ("If the context is insufficient, reply exactly: I couldn't find relevant information in your documents. " if allow_not_found else "")
         sysmsg = (
-            "You extract key ideas and cite pages. Return Markdown for prose; typeset all math in LaTeX using $...$ (inline) and $$...$$ (display). "
-            "Use ONLY the provided context; if it is insufficient, reply exactly: I couldn't find relevant information in your documents. "
-            "Resolve pronouns and references (e.g., 'it', 'they', 'the two') using any Conversation memory blocks present in the Context."
+            f"You extract key ideas and {cite_clause}return Markdown for prose; typeset all math in LaTeX using $...$ (inline) and $$...$$ (display). "
+            + nf_clause +
+            "Resolve pronouns and references (e.g., 'it', 'they', 'the two') using any Conversation memory blocks present in the Context. "
+            "Do not cite Conversation memory or Long‑term memory; cite only document sources. "
+            "Be thorough and structured: include short section headings and clear bullet lists; aim for a detailed answer (≈180–350 words) unless asked for brevity."
         ) + (" " + prefs if prefs else "")
         messages = [{"role": "system", "content": sysmsg}]
         if history:
@@ -1216,14 +1281,23 @@ def summarize(question, top_chunks, history=None):
                     hist += f"\nUser: {turn['q']}\n"
                 if turn.get("a"):
                     hist += f"Assistant: {turn['a']}\n"
+        citeline = "with citations like [FileName.pdf p.12]; " if ASK_INLINE_CITATIONS else ""
+        nf_clause = ("If the context is insufficient, reply exactly: I couldn't find relevant information in your documents." if allow_not_found else "")
         full = (
-            "System: You extract key ideas from the provided context only. Return Markdown for prose with citations like [FileName.pdf p.12]; typeset all math in LaTeX using $...$ / $$...$$. "
-            "If the context is insufficient, reply exactly: I couldn't find relevant information in your documents."
+            f"System: You extract key ideas from the provided context only. Return Markdown for prose {citeline}typeset all math in LaTeX using $...$ / $$...$$. "
+            + nf_clause
         ) + hist + "\n" + prompt + "\nAssistant:"
         text = _normalize_md(_hf_generate(full, max_new_tokens=700))
         text = _clean_math_citations(text)
+    # Remove citations to docs not used in retrieved chunks
+    allowed_docs = { (pathlib.Path(_doc_name(c)).name if _doc_name(c) else "") for c in used if not c.get("is_memory") }
+    allowed_docs = {d for d in allowed_docs if d}
+    if allowed_docs:
+        text = _strip_unknown_citations(text, allowed_docs)
+    # Build citations from document chunks only (exclude memory)
+    doc_used = [c for c in used if not c.get("is_memory")]
     cites = []
-    for c in used:
+    for c in (doc_used if doc_used else used):
         cites.append(_fmt_source(c))
     dedup = []
     seen = set()
@@ -1233,10 +1307,20 @@ def summarize(question, top_chunks, history=None):
     cites = _compress_citations(dedup)[:15]
     if ASK_CITATION_NOTE:
         text += "\n\n*Grounded in the cited pages below.*"
-    quotes = _extract_quotes(question, used, max_quotes=5, window=1)
+    ev_max = int(os.getenv("ASK_EVIDENCE_MAX", "2"))
+    ev_win = int(os.getenv("ASK_EVIDENCE_WINDOW", "1"))
+    ev_chars = int(os.getenv("ASK_EVIDENCE_MAX_CHARS", "180"))
+    quotes = _extract_quotes(question, (doc_used if doc_used else used), max_quotes=ev_max, window=ev_win)
+    # Clip quote lengths to reduce UI clutter and budgets
+    for q in quotes:
+        try:
+            if isinstance(q.get("quote"), str) and len(q["quote"]) > ev_chars:
+                q["quote"] = q["quote"][:ev_chars].rstrip() + "…"
+        except Exception:
+            pass
     return {"answer": text, "citations": cites, "quotes": quotes}
 
-def summarize_batched(question, chunks, history=None, progress_cb=None, max_batches=None, time_budget_sec=None, exhaustive=None):
+def summarize_batched(question, chunks, history=None, progress_cb=None, max_batches=None, time_budget_sec=None, exhaustive=None, *, strict_docs: bool = False, orig_question: str | None = None, allow_not_found: bool = True):
     cfg = load_config()
     scoped = _scope_chunks(question, chunks)
     scoped = _filter_by_chapter(question, scoped)
@@ -1273,17 +1357,44 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
     else:
         ordered = prim
     try:
-        rer_idx = _rerank(question, ordered, name=RERANKER_NAME_DEFAULT, top_n=RERANK_TOP_N)
+        cur_rr = _current_reranker_name()
+        if progress_cb:
+            try: progress_cb(f"Reranker: {cur_rr if cur_rr else 'off'}…")
+            except Exception: pass
+        rer_idx = _rerank(question, ordered, name=cur_rr, top_n=RERANK_TOP_N)
         ordered = [ordered[i] for i in rer_idx]
+        if progress_cb:
+            try: progress_cb("Reranker: done")
+            except Exception: pass
     except Exception:
-        pass
-    batches = _batch_chunks(ordered, BATCH_CHAR_BUDGET)
+        if progress_cb:
+            try: progress_cb("Reranker: skipped (error)")
+            except Exception: pass
+    try:
+        dyn_budget = int(os.getenv("ASK_BATCH_CHAR_BUDGET", str(BATCH_CHAR_BUDGET)))
+    except Exception:
+        dyn_budget = BATCH_CHAR_BUDGET
+    batches = _batch_chunks(ordered, dyn_budget)
+    # Announce sweep plan
+    if progress_cb:
+        try:
+            planned_total = min(len(batches), max_batches)
+            if not sweep:
+                planned_total = min(planned_total, 1)
+            progress_cb(
+                f"Sweep plan: batches={planned_total}/{len(batches)} • char_budget={dyn_budget} • time_budget={time_budget_sec}s • exhaustive={sweep}"
+            )
+        except Exception:
+            pass
     if cfg.get("OPENAI_API_KEY"):
         prefs = _pref_string()
+        nf_clause = ("If the context is insufficient, reply exactly: I couldn't find relevant information in your documents. " if allow_not_found else "")
         sysmsg = (
             "You extract key ideas and cite pages. Return Markdown for prose; typeset all math in LaTeX using $...$ (inline) and $$...$$ (display). "
-            "Use ONLY the provided context; if it is insufficient, reply exactly: I couldn't find relevant information in your documents. "
-            "Resolve pronouns and references (e.g., 'it', 'they', 'the two') using any Conversation memory blocks present in the Context."
+            + nf_clause +
+            "Resolve pronouns and references (e.g., 'it', 'they', 'the two') using any Conversation memory blocks present in the Context. "
+            + (" STRICT EXTRACTIVE MODE: copy or minimally paraphrase; do not add content beyond the context. " if strict_docs else "")
+            + "Be thorough and structured: include short section headings and clear bullet lists; aim for a detailed answer (≈180–350 words) unless asked for brevity."
         ) + (" " + prefs if prefs else "")
         hist_msgs = []
         if history:
@@ -1305,11 +1416,17 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
             total = min(total, 1)
         t_end = time.time() + time_budget_sec if sweep else None
         plateau = 0
+        t0 = time.time()
         for i, batch in enumerate(batches[:total], 1):
+            if progress_cb:
+                try:
+                    progress_cb(f"Batch {i}/{total}…")
+                except Exception:
+                    pass
             if t_end and time.time() >= t_end:
                 break
             ctx = _format_ctx(batch)
-            prompt = TEMPLATE.format(q=question, ctx=ctx, terms=", ".join(_keywords(question)))
+            prompt = _build_template(allow_not_found).format(q=question, ctx=ctx, terms=", ".join(_keywords(question)))
             messages = [{"role": "system", "content": sysmsg}] + hist_msgs + [{"role": "user", "content": prompt}]
             pre_tokens = _estimate_tokens("\n".join(m["content"] for m in messages)) + 600
             if used_tok + pre_tokens > tok_cap or used_req + 1 > req_cap:
@@ -1324,20 +1441,30 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
             ans, spent = _openai_chat(messages, max_new_tokens=600)
             used_tok += spent
             used_req += 1
+            if progress_cb:
+                try:
+                    elapsed = int(time.time() - t0)
+                    progress_cb(f"Batch {i}/{total} done • elapsed={elapsed}s • tokens≈{used_tok} • requests={used_req}")
+                except Exception:
+                    pass
             parts.append(ans)
             prev = set(seen_sources)
             for c in batch:
-                seen_sources.append(_fmt_source(c))
+                if not c.get("is_memory"):
+                    seen_sources.append(_fmt_source(c))
             delta = len(set(seen_sources) - prev)
             if not sweep:
                 break
             elif i >= 2 and delta == 0:
                 break
         if not parts:
-            return summarize(question, ordered[:max(1, min(6, len(ordered)))], history=history)
+            return summarize(question, ordered[:max(1, min(6, len(ordered)))], history=history, strict_docs=strict_docs, orig_question=orig_question, allow_not_found=allow_not_found)
         fuse_ctx = "\n\n---\n\n".join(parts)[:40000]
         fuse_prompt = "You are consolidating multiple partial answers derived strictly from course readings. Merge them into a single, non-redundant answer. Keep formulas, be precise, and keep citations from the partials in place.\n\nQuestion:\n" + question + "\n\nPartials:\n" + fuse_ctx
-        final, _ = _openai_chat([{"role": "system", "content": "Return a single clean Markdown answer (keep citations as-is) and typeset all math in LaTeX using $...$ / $$...$$."}, {"role": "user", "content": fuse_prompt}], max_new_tokens=800)
+        final, _ = _openai_chat([
+            {"role": "system", "content": "Return a single clean Markdown answer (keep citations as-is) and typeset all math in LaTeX using $...$ / $$...$$. Be comprehensive and structured with short headings and bullet lists; aim for a detailed answer (≈180–350 words)."},
+            {"role": "user", "content": fuse_prompt}
+        ], max_new_tokens=800)
         final = _clean_math_citations(final)
     else:
         parts = []
@@ -1356,7 +1483,7 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
                 except Exception:
                     pass
             ctx = _format_ctx(batch)
-            prompt = TEMPLATE.format(q=question, ctx=ctx, terms=", ".join(_keywords(question)))
+            prompt = _build_template(allow_not_found).format(q=question, ctx=ctx, terms=", ".join(_keywords(question)))
             hist = ""
             if history:
                 for turn in history[-4:]:
@@ -1364,9 +1491,13 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
                         hist += f"\nUser: {turn['q']}\n"
                     if turn.get("a"):
                         hist += f"Assistant: {turn['a']}\n"
+            citeline = "with citations like [FileName.pdf p.12]; " if ASK_INLINE_CITATIONS else ""
+            nf_clause = ("If the context is insufficient, reply exactly: I couldn't find relevant information in your documents. " if allow_not_found else "")
             full = (
-                "System: You extract key ideas from the provided context only. Return Markdown for prose with citations like [FileName.pdf p.12]; typeset all math in LaTeX using $...$ / $$...$$. "
-                "If the context is insufficient, reply exactly: I couldn't find relevant information in your documents."
+                f"System: You extract key ideas from the provided context only. Return Markdown for prose {citeline}typeset all math in LaTeX using $...$ / $$...$$. "
+                + nf_clause +
+                "Resolve pronouns using Conversation memory, but never cite Conversation memory or Long‑term memory — cite only document sources." \
+                + (" STRICT EXTRACTIVE MODE: copy or minimally paraphrase; do not add content beyond the context." if strict_docs else "")
             ) + hist + "\n" + prompt + "\nAssistant:"
             ans = _normalize_md(_hf_generate(full, max_new_tokens=600))
             parts.append(ans)
@@ -1379,10 +1510,11 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
             elif i >= 2 and delta == 0:
                 break
         if not parts:
-            return summarize(question, ordered[:max(1, min(6, len(ordered)))], history=history)
+            return summarize(question, ordered[:max(1, min(6, len(ordered)))], history=history, strict_docs=strict_docs, orig_question=orig_question)
         fuse_ctx = "\n\n---\n\n".join(parts)[:40000]
-        fuse_prompt = "You are consolidating multiple partial answers derived strictly from course readings. Merge them into a single, non-redundant answer. Keep formulas, be precise, and keep citations from the partials in place.\n\nQuestion:\n" + question + "\n\nPartials:\n" + fuse_ctx
-        final = _normalize_md(_hf_generate("System: Consolidate the partials into one Markdown answer, preserving citations; typeset all math in LaTeX using $...$ / $$...$$.\n" + fuse_prompt + "\nAssistant:", max_new_tokens=800))
+        fuse_prompt = "You are consolidating multiple partial answers derived strictly from course readings. Merge them into a single, non-redundant answer. Keep formulas and be precise." + (" Preserve citations from the partials." if ASK_INLINE_CITATIONS else "") + "\n\nQuestion:\n" + question + "\n\nPartials:\n" + fuse_ctx
+        sys_fuse = "System: Consolidate the partials into one Markdown answer; typeset all math in LaTeX using $...$ / $$...$$." + (" Preserve citations." if ASK_INLINE_CITATIONS else "")
+        final = _normalize_md(_hf_generate(sys_fuse + "\n" + fuse_prompt + "\nAssistant:", max_new_tokens=800))
         final = _clean_math_citations(final)
     cites = []
     seen = set()
@@ -1391,11 +1523,31 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
             cites.append(s); seen.add(s)
         if len(cites) >= 15:
             break
-    quotes = _extract_quotes(question, ordered[:min(len(ordered), 200)], max_quotes=5, window=1)
+    # Quotes only from document chunks
+    ordered_doc = [c for c in ordered if not c.get("is_memory")]
+    ev_max = int(os.getenv("ASK_EVIDENCE_MAX", "2"))
+    ev_win = int(os.getenv("ASK_EVIDENCE_WINDOW", "1"))
+    ev_chars = int(os.getenv("ASK_EVIDENCE_MAX_CHARS", "180"))
+    quotes = _extract_quotes(question, (ordered_doc if ordered_doc else ordered)[:min(len(ordered), 200)], max_quotes=ev_max, window=ev_win)
+    for q in quotes:
+        try:
+            if isinstance(q.get("quote"), str) and len(q["quote"]) > ev_chars:
+                q["quote"] = q["quote"][:ev_chars].rstrip() + "…"
+        except Exception:
+            pass
     cites = _compress_citations(cites)[:15]
     if ASK_CITATION_NOTE:
         final += "\n\n*Grounded in the cited pages below.*"
-    quotes = _extract_quotes(question, ordered[:min(len(ordered), 200)], max_quotes=5, window=1)
+    ev_max = int(os.getenv("ASK_EVIDENCE_MAX", "2"))
+    ev_win = int(os.getenv("ASK_EVIDENCE_WINDOW", "1"))
+    ev_chars = int(os.getenv("ASK_EVIDENCE_MAX_CHARS", "180"))
+    quotes = _extract_quotes(question, (ordered_doc if ordered_doc else ordered)[:min(len(ordered), 200)], max_quotes=ev_max, window=ev_win)
+    for q in quotes:
+        try:
+            if isinstance(q.get("quote"), str) and len(q["quote"]) > ev_chars:
+                q["quote"] = q["quote"][:ev_chars].rstrip() + "…"
+        except Exception:
+            pass
     return {"answer": final, "citations": cites, "quotes": quotes}
 
 def summarize_document(chunks):
@@ -1410,7 +1562,9 @@ def summarize_document(chunks):
     ctx = _clip_context(filtered)
     if cfg.get("OPENAI_API_KEY"):
         from openai import OpenAI
-        client = OpenAI(api_key=cfg["OPENAI_API_KEY"])
+        import os
+        key = cfg.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        client = OpenAI(api_key=key)
         prompt = DOC_TEMPLATE.format(ctx=ctx)
         msg = client.chat.completions.create(
             model=_openai_model(),

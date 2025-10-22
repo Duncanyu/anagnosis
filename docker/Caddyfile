@@ -1,0 +1,21 @@
+{
+  # Optional: set a contact email for Let's Encrypt notifications
+  # email you@example.com
+}
+
+{$DOMAIN} {
+  encode zstd gzip
+
+  @api path /api*
+  reverse_proxy @api api:8000
+  reverse_proxy web:7860
+
+  header /* {
+    X-Frame-Options DENY
+    X-Content-Type-Options nosniff
+    Referrer-Policy no-referrer
+    # HSTS (enable only after verifying HTTPS works):
+    # Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+  }
+}
+

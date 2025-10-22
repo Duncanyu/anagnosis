@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from api.auth.middleware import require_auth
 from api.db.models import User
 from api.core.config import load_config
+from api.routes.settings import apply_env_for_user
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -104,5 +105,13 @@ async def api_chat_title(req: Request, user: User = Depends(require_auth)) -> JS
     except Exception:
         data = {}
     text = str(data.get("text") or data.get("summary") or "").strip()
-    title = _generate_chat_title(text)
+    # Apply per-user env so OPENAI_API_KEY and model are available during title generation
+    restore_env = apply_env_for_user(str(user.id))
+    try:
+        title = _generate_chat_title(text)
+    finally:
+        try:
+            restore_env()
+        except Exception:
+            pass
     return JSONResponse({"title": title})

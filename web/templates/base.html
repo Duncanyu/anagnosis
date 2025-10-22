@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Anagnosis</title>
+    <link rel="icon" type="image/png" href="/assets/icon.png" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
@@ -197,9 +198,27 @@ body::before{
 .chat-settings-inline .options label:has(input[type="number"]) span,
 .chat-settings-inline .options label:has(select) span{ margin-right:6px; }
 .chat-settings-inline .options{ scroll-behavior:smooth; }
+.chat-settings-inline .options details.exhaustive-menu{ display:inline-block; position:relative; }
+
+/* Floating popover for Exhaustive controls */
+.ex-popover{ pointer-events:none; }
+.ex-popover .ex-panel{ pointer-events:auto; background:#fff; border:1px solid var(--accent-border);
+  border-radius:14px; box-shadow:0 28px 80px -24px rgba(15,23,42,0.45); }
+.ex-popover .ex-inner{ padding:10px 12px; }
+.ex-popover .ex-header{ font-weight:700; font-size:.82rem; margin-bottom:6px; color:#0f172a; }
+.ex-popover .ex-fields{ display:flex; flex-direction:column; gap:10px; }
+.ex-popover .ex-fields label{ display:flex; gap:6px; align-items:center; font-size:.80rem; color:#0f172a; background:transparent; border:none; padding:0 }
+.ex-popover .ex-fields label span{ min-width:120px; font-weight:600; }
+.ex-popover .ex-fields input[type="number"]{ width:100px; text-align:center; font-size:.80rem; border:1px solid var(--accent-border); border-radius:8px; padding:2px 6px; }
 .chat-settings-inline input[type="number"]{ height:20px; padding:0 6px; width:52px; font-size:.68rem; text-align:center; -moz-appearance:textfield; border-radius:999px }
 .chat-settings-inline select{ height:20px; padding:0 12px 0 8px; font-size:.68rem; max-width:120px; border-radius:999px }
 .chat-settings-inline input[type="checkbox"]{width:14px; height:14px}
+.themed-input{ border:1px solid var(--accent-border); background:#fff; color:#0f172a; border-radius:10px; padding:6px 10px; box-shadow:0 1px 0 rgba(15,23,42,0.03) inset }
+.themed-input:focus{ outline:none; border-color:var(--primary); box-shadow:0 0 0 2px rgba(59,130,246,0.15) }
+.themed-select{ appearance:none; -webkit-appearance:none; -moz-appearance:none; border:1px solid var(--accent-border); background:#fff; color:#0f172a; border-radius:10px; padding:6px 28px 6px 10px; box-shadow:0 1px 0 rgba(15,23,42,0.03) inset; background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%23334155' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>"); background-repeat:no-repeat; background-position:right 8px center; background-size:16px }
+.themed-select:focus{ outline:none; border-color:var(--primary); box-shadow:0 0 0 2px rgba(59,130,246,0.15) }
+/* Apply chevron styling to other selects too */
+.chat-settings-inline select, .settings-card select{ appearance:none; -webkit-appearance:none; -moz-appearance:none; background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%23334155' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>"); background-repeat:no-repeat; background-position:right 6px center; background-size:14px; padding-right:22px; border-color:var(--accent-border); }
 .chat-controls{ display:block; background:transparent; border:none; border-radius:14px; padding:6px 6px 10px; position:relative; }
 .chat-controls summary{ display:none; cursor:pointer; list-style:none; }
 .chat-controls summary::-webkit-details-marker{ display:none; }
@@ -235,6 +254,12 @@ body::before{
 @keyframes messageEnter{ from{ opacity:0; transform:translateY(10px) scale(.97);} to{ opacity:1; transform:translateY(0) scale(1);} }
 #chat-window .message.entering{ animation:messageEnter .24s ease forwards; }
 
+/* Inline retry/view chips */
+.retry-chips{ display:flex; gap:8px; margin-top:4px }
+.retry-chip, .view-chip{ border:1px solid var(--accent-border); background:var(--accent-bg-mid); color:var(--accent-text); border-radius:999px; padding:4px 10px; font-weight:600; font-size:.78rem; cursor:pointer; text-decoration:none }
+
+.ask-status{ position:relative; margin:4px 0 6px 0; padding:0 14px; font-size:.78rem; color:#334155; min-height:18px; display:none }
+
 @keyframes emptyEnter{ from{ opacity:0; transform:translateY(6px) } to{ opacity:1; transform:translateY(0) } }
 
 .sidebar-toggle{
@@ -257,15 +282,44 @@ body::before{
 .sidebar-toggle .sidebar-icon{ display:inline-flex; flex-direction:column; justify-content:center; gap:3px; }
 .sidebar-toggle .sidebar-icon span{ display:block; width:16px; height:2px; background:currentColor; border-radius:999px; }
 
+/* Trace chip styling */
+details.trace > summary{
+  display:inline-block;
+  padding:4px 10px;
+  border-radius:999px;
+  background:var(--accent-bg-mid);
+  border:1px solid var(--accent-border);
+  color:var(--accent-text);
+  font-size:.78rem;
+  font-weight:600;
+  cursor:pointer;
+  user-select:none;
+}
+details.trace{
+  margin:2px 0 6px 0;
+}
+details.trace[open]{
+  background:transparent;
+}
+details.trace > div, details.trace > ul{
+  margin-top:6px;
+}
+
 /* --- Compact sticky footer input + controls -------------------------------- */
 /* Input row: keep textarea + Send on one line, add inner padding so Send
    never clips the right edge */
-.chat-input{ display:flex; align-items:center; gap:10px; padding:0 14px; margin-bottom:6px; }
-#question{ flex:1 1 auto; min-height:34px; max-height:144px; padding:8px 10px; resize:none; font-size:.9rem; line-height:1.35; overflow-y:auto; }
+  .chat-input{ display:flex; align-items:center; gap:10px; padding:0 14px; margin-bottom:6px; }
+  .chat-input .input-wrap{ position:relative; flex:1 1 auto; display:flex; }
+  .chat-input .input-wrap textarea{ width:100%; padding-left:38px; }
+  .chat-input .attach-inside{ position:absolute; left:10px; top:50%; transform:translateY(-50%); border:0; background:transparent; color:#334155; font-size:18px; line-height:1; padding:0; cursor:pointer; }
+#question{ flex:1 1 auto; min-height:34px; max-height:144px; padding:8px 10px 8px 28px; resize:none; font-size:.9rem; line-height:1.35; overflow-y:auto; }
 .send-btn{ flex:0 0 auto; height:32px; line-height:32px; padding:0 8px; display:inline-flex; align-items:center; justify-content:center; }
 .send-btn{ transition:transform .18s ease, box-shadow .18s ease; }
 .send-btn:active{ transform:translateY(1px) scale(0.98); }
 .send-btn:disabled{ opacity:.6; pointer-events:none; }
+.send-btn .icon-cancel{ display:none; }
+.send-btn.is-cancel .icon-send{ display:none !important; }
+.send-btn.is-cancel .icon-cancel{ display:inline-flex !important; }
 
 /* Controls bar: single line, dense; squeeze horizontally */
 .chat-settings-inline{ font-size:.74rem }
@@ -368,7 +422,7 @@ body::before{
 .ingest-dropzone:active{ transform:translateY(1px); }
 .drop-text{ display:flex; flex-direction:column; gap:6px; color:#1e293b; text-align:center; }
 .drop-title{ font-weight:700; font-size:1.2rem; }
-.drop-title .upload-icon{ display:inline-block; width:28px; height:28px; line-height:28px; text-align:center; background:#e0e7ff; color:var(--accent-text); border-radius:8px; margin-right:8px; font-size:16px; }
+.drop-title .upload-icon{ display:none !important; }
 .drop-sub{ font-size:.88rem; color:#475569; }
 .drop-foot{ font-size:.78rem; color:#64748b; }
 .drop-action{ position:absolute; right:18px; bottom:18px; font-weight:700; font-size:1rem; color:var(--accent-text); white-space:nowrap; background:var(--accent-bg-active); border:1px solid var(--accent-border); padding:12px 18px; border-radius:12px; }
@@ -416,9 +470,12 @@ body::before{
 .book-card .book-meta{ font-size:.78rem; color:#475569; display:flex; gap:12px; flex-wrap:wrap; }
 .book-card .book-summary{ font-size:.8rem; color:#1f2937; line-height:1.45; flex:1 1 auto; overflow:auto; max-height:150px; padding-right:2px; scrollbar-width:none; }
 .book-card .book-summary::-webkit-scrollbar{ width:0; height:0; }
-.book-card .book-actions{ display:flex; justify-content:flex-end; }
-.book-card button{ border-radius:999px; padding:4px 10px; border:1px solid rgba(220,38,38,0.25); background:rgba(248,113,113,0.14); color:#b91c1c; font-size:.78rem; font-weight:600; cursor:pointer; transition:background .18s ease, transform .18s ease; }
-.book-card button:hover{ background:rgba(248,113,113,0.22); }
+.book-card .book-actions{ display:flex; justify-content:flex-end; gap:10px; }
+.book-card button{ border-radius:999px; padding:4px 10px; font-size:.78rem; font-weight:600; cursor:pointer; transition:background .18s ease, transform .18s ease; }
+.book-card button.library-remove{ border:1px solid rgba(220,38,38,0.25); background:rgba(248,113,113,0.14); color:#b91c1c; }
+.book-card button.library-remove:hover{ background:rgba(248,113,113,0.22); }
+.book-card button.library-details{ border:1px solid var(--accent-border); background:var(--accent-bg-mid); color:var(--accent-text); }
+.book-card button.library-details:hover{ filter:brightness(1.05); }
 .book-card button:active{ transform:translateY(1px); }
 .book-card.pending-remove{ opacity:.55; filter:saturate(.8); }
 
@@ -533,10 +590,10 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
         </div>
         <nav class="anag-tabs">
           <button data-tab="library" class="active">Library</button>
-          <button data-tab="ask">Ask!</button>
+          <button data-tab="ask">Conversations</button>
           <button data-tab="settings">Settings</button>
           {% if user and user.get('is_dev') %}
-          <button data-tab="dev">Dev</button>
+          <button data-tab="dev">Developer Panel</button>
           {% endif %}
         </nav>
         <button type="button" id="toggle-sidebar" class="sidebar-toggle" aria-label="Toggle chats" aria-expanded="false" aria-controls="conversation-list">
@@ -571,13 +628,13 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
             <div class="library-panel library-ingest">
               <div class="ingest-header">
                 <h2>Ingest documents</h2>
-                <p>Select PDFs to enrich your library. The pipeline will OCR, chunk, embed, and summarize each file.</p>
+                <p>Select documents with text to enrich your library. The pipeline will extract, chunk, embed, and summarize each file. (Pure images/diagrams without text will have limited results.)</p>
               </div>
               <form id="upload-form" class="ingest-form" enctype="multipart/form-data">
-                <input id="upload-input" name="files" type="file" accept="application/pdf" multiple hidden />
+                <input id="upload-input" name="files" type="file" accept="application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown,text/html,application/rtf,image/*,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple hidden />
                 <label for="upload-input" class="ingest-dropzone">
                   <div class="drop-text">
-                    <span class="drop-title"><span class="upload-icon" aria-hidden="true">📄</span> Drag and drop PDFs here</span>
+                    <span class="drop-title">Drag and drop documents with text here</span>
                     <span class="drop-sub">or click to browse for documents</span>
                   </div>
                 </label>
@@ -608,7 +665,20 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
               <div class="library-shelf-header">
                 <div>
                   <h3>Your library</h3>
-                  <p>All ingested documents appear below. Remove books to reclaim space.</p>
+                  <p>All ingested documents appear below.</p>
+                  <div class="library-tools" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:6px;">
+                    <input id="library-search" class="themed-input" type="search" placeholder="Search documents…" style="flex:1 1 220px; min-width:180px;" />
+                    <span class="sort-group" style="display:inline-flex; align-items:center; gap:6px; flex:0 0 auto;">
+                      <select id="library-sort" class="themed-select" title="Sort by" style="flex:0 0 auto;">
+                        <option value="date" selected>Date added</option>
+                        <option value="pages">Pages</option>
+                        <option value="chunks">Chunks</option>
+                      </select>
+                      <button type="button" id="library-order" class="themed-input" title="Toggle sort order" aria-label="Toggle sort order" style="flex:0 0 auto; display:inline-flex; align-items:center; gap:6px; padding:6px 10px;">
+                        <span id="library-order-icon">↓</span>
+                      </button>
+                    </span>
+                  </div>
                 </div>
                 <div class="library-actions">
                   <button type="button" id="clear-library" class="danger">Clear all</button>
@@ -617,7 +687,7 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
                 </div>
               </div>
               <div id="library-grid" class="library-grid"></div>
-              <div id="library-empty" class="library-empty">Your library is empty. Ingest a PDF to get started.</div>
+              <div id="library-empty" class="library-empty">Your library is empty. Ingest a document to get started.</div>
             </div>
           </div>
         </section>
@@ -649,13 +719,26 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
 
               <div class="chat-footer">
                 <div id="ask-progress" class="ask-progress" aria-hidden="true"></div>
+                <div id="ask-status" class="ask-status" aria-live="polite"></div>
+                <ul id="chat-attachments" class="attach-list" style="display:none; margin:6px 12px; padding:0; list-style:none;"></ul>
                 <form id="ask-form" class="chat-input">
-                  <textarea id="question" name="question" rows="1" placeholder="Ask anything about your library…"></textarea>
+                  <div class="input-wrap">
+                    <button type="button" id="attach-image" class="attach-inside" title="Attach image" aria-label="Attach image">+</button>
+                    <textarea id="question" name="question" rows="1" placeholder="Ask anything about your library…"></textarea>
+                    <input id="image-input" name="images" type="file" accept="image/*" multiple hidden />
+                  </div>
                   <button type="submit" class="primary send-btn" title="Send" aria-label="Send">
-                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                      <path d="M12 19V6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                      <path d="M7 11l5-5 5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
+                    <span class="icon-send" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 19V6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <path d="M7 11l5-5 5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                      </svg>
+                    </span>
+                    <span class="icon-cancel" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <rect x="6" y="6" width="12" height="12" rx="2" ry="2" stroke="currentColor" stroke-width="2"/>
+                      </svg>
+                    </span>
                     <span class="sr-only">Send</span>
                   </button>
                 </form>
@@ -663,26 +746,16 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
                   <details class="chat-controls" open>
                     <summary>Options</summary>
                     <fieldset class="options">
-                    
                     <label><input type="checkbox" id="formula-mode" /><span>Formula mode</span></label>
-                    <label><input type="checkbox" id="agents-enabled" /><span>Agents</span></label>
                     <label><input type="checkbox" id="web-enabled" /><span>Web search</span></label>
+                    <label><input type="checkbox" id="strict-docs" /><span>RAG only</span></label>
                     <label><input type="checkbox" id="exhaustive" {% if defaults["ASK_EXHAUSTIVE"] %}checked{% endif %} /><span>Exhaustive sweep</span></label>
+                    <!-- Exhaustive options moved to floating popover to keep controls clean -->
+                    <label><input type="checkbox" id="reranker-on" /><span>Reranker</span></label>
                     <label><span>Top-K</span><input type="number" id="top-k" value="10" min="1" max="50" /></label>
-                    <label><span>Max batches</span><input type="number" id="max-batches" value="{{ defaults['ASK_MAX_BATCHES'] }}" min="1" max="20" /></label>
-                    <label><span>Time budget (s)</span><input type="number" id="time-budget" value="{{ defaults['ASK_TIME_BUDGET_SEC'] }}" min="30" max="900" step="15" /></label>
-                    <label><span>Only document</span>
+                    <label><span>Document:</span>
                       <select id="only-doc">
                         <option value="">All documents</option>
-                      </select>
-                    </label>
-                    <label><span>Reranker</span>
-                      <select id="reranker">
-                        <option value="off" {% if defaults['ASK_RERANKER']=='off' %}selected{% endif %}>Off</option>
-                        <option value="minilm" {% if defaults['ASK_RERANKER']=='minilm' %}selected{% endif %}>MiniLM</option>
-                        <option value="bge-m3" {% if defaults['ASK_RERANKER']=='bge-m3' %}selected{% endif %}>BGE-M3</option>
-                        <option value="bge-base" {% if defaults['ASK_RERANKER']=='bge-base' %}selected{% endif %}>BGE-Base</option>
-                        <option value="bge-large" {% if defaults['ASK_RERANKER']=='bge-large' %}selected{% endif %}>BGE-Large</option>
                       </select>
                     </label>
                     </fieldset>
@@ -694,13 +767,24 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
         </section>
         <section id="settings" class="tab-panel">
           <form id="settings-form" class="settings-layout">
+            <div class="settings-footer" style="position:sticky; top:0; background:##f2f4f8; z-index:5; padding-top:10px;">
+              <span id="settings-status"></span>
+            </div>
             <div class="settings-grid">
               <section class="settings-card">
                 <h3>API keys</h3>
                 <div class="field"><label for="openai-key">OpenAI API key</label><input type="password" id="openai-key" placeholder="sk-…" /></div>
                 <div class="field"><label for="hf-token">HuggingFace token</label><input type="password" id="hf-token" placeholder="hf_…" /></div>
-                <div class="field"><label for="serp-key">SerpAPI key</label><input type="password" id="serp-key" placeholder="serp_…" /></div>
-                <div class="field"><label for="brave-key">Brave API key</label><input type="password" id="brave-key" placeholder="brv_…" /></div>
+                <div class="field"><label for="serp-key">SerpAPI key</label><input type="password" id="serp-key" placeholder="..." /></div>
+                <div class="field"><label for="brave-key">Brave API key</label><input type="password" id="brave-key" placeholder="BSA_" /></div>
+                <div class="field"><label for="web-provider">Web search provider</label>
+                  <select id="web-provider">
+                    <option value="auto" {% if defaults['WEB_SEARCH_PROVIDER']=='auto' %}selected{% endif %}>Auto</option>
+                    <option value="brave" {% if defaults['WEB_SEARCH_PROVIDER']=='brave' %}selected{% endif %}>Brave</option>
+                    <option value="serpapi" {% if defaults['WEB_SEARCH_PROVIDER']=='serpapi' %}selected{% endif %}>SerpAPI</option>
+                    <option value="duckduckgo" {% if defaults['WEB_SEARCH_PROVIDER']=='duckduckgo' %}selected{% endif %}>DuckDuckGo</option>
+                  </select>
+                </div>
               </section>
 
               <section class="settings-card">
@@ -746,8 +830,7 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
                 </div>
                 <div class="field"><label for="settings-reranker">Reranker</label>
                   <select id="settings-reranker">
-                    <option value="off" {% if defaults['ASK_RERANKER']=='off' %}selected{% endif %}>Off</option>
-                    <option value="minilm" {% if defaults['ASK_RERANKER']=='minilm' %}selected{% endif %}>MiniLM</option>
+                    <option value="minilm" {% if defaults['ASK_RERANKER'] in ['minilm','off'] %}selected{% endif %}>MiniLM</option>
                     <option value="bge-m3" {% if defaults['ASK_RERANKER']=='bge-m3' %}selected{% endif %}>BGE-M3</option>
                     <option value="bge-base" {% if defaults['ASK_RERANKER']=='bge-base' %}selected{% endif %}>BGE-Base</option>
                     <option value="bge-large" {% if defaults['ASK_RERANKER']=='bge-large' %}selected{% endif %}>BGE-Large</option>
@@ -757,10 +840,7 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
               </section>
             </div>
 
-            <div class="settings-footer">
-              <button type="submit" class="primary">Save settings</button>
-              <span id="settings-status"></span>
-            </div>
+            
           </form>
         </section>
       </main>
@@ -776,6 +856,7 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
                 <button type="button" class="danger" id="dev-clear-settings">Clear user settings</button>
                 <button type="button" class="danger" id="dev-clear-memory">Clear memory</button>
                 <button type="button" class="danger" id="dev-clear-all">Clear all (settings + memory)</button>
+                <button type="button" class="danger" id="dev-purge-libraries">Purge all libraries</button>
               </div>
               <div style="margin-top:8px; font-size:.9rem; color:#334155;">
                 <em>Note:</em> This does not remove documents or indexes.
@@ -791,6 +872,40 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
               </div>
             </div>
             <div class="settings-card">
+              <h3>Admin Console</h3>
+              <div class="field">
+                <label for="dev-console-input">Command</label>
+                <div style="display:flex; gap:8px; align-items:center;">
+                  <input id="dev-console-input" type="text" placeholder="get usage" style="flex:1 1 auto;" />
+                  <button id="dev-console-run" type="button">Run</button>
+                </div>
+              </div>
+              <div class="field">
+                <label>Output</label>
+                <pre id="dev-console-output" style="min-height:80px; max-height:220px; overflow:auto; white-space:pre-wrap"></pre>
+              </div>
+              <details style="margin-top:8px;">
+                <summary>Console syntax</summary>
+                <div style="font-size:.9rem; color:#334155; margin-top:6px;">
+                  <p>Commands (dev-only, mapped to <code>/api/admin/*</code>):</p>
+                  <ul>
+                    <li><code>get usage</code> — show per-user usage counters</li>
+                    <li><code>get users</code> — list users</li>
+                    <li><code>rebuild</code> — rebuild FAISS index</li>
+                    <li><code>clear settings</code> — clear per-user settings</li>
+                    <li><code>clear memory</code> — clear per-user memory</li>
+                    <li><code>clear all</code> — run both clear actions</li>
+                  </ul>
+                  <p>General forms:</p>
+                  <ul>
+                    <li><code>get &lt;path&gt;</code> — e.g., <code>get usage</code></li>
+                    <li><code>post &lt;path&gt;</code> — e.g., <code>post rebuild_index</code></li>
+                    <li>Shorthands: <code>rebuild</code>, <code>clear settings|memory|all</code></li>
+                  </ul>
+                </div>
+              </details>
+            </div>
+            <div class="settings-card">
               <h3>Status</h3>
               <pre id="dev-status" style="min-height:60px; white-space:pre-wrap"></pre>
             </div>
@@ -802,6 +917,26 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
     <script id="bootstrap-settings" type="application/json">{{ defaults | tojson | safe }}</script>
     <script id="bootstrap-auth" type="application/json">{{ {"user": user} | tojson | safe }}</script>
     <div id="sidebar-backdrop"></div>
+    <!-- Floating popover for Exhaustive sweep options -->
+    <div id="ex-popover" class="ex-popover" style="display:none; position:fixed; z-index:2000;">
+      <div class="ex-panel" role="dialog" aria-modal="false" aria-label="Exhaustive options">
+        <div class="ex-inner">
+          <div class="ex-header">Exhaustive options</div>
+          <div class="ex-fields">
+            <label><span>Max batches</span><input type="number" id="max-batches" value="{{ defaults['ASK_MAX_BATCHES'] }}" min="1" max="20" /></label>
+            <label><span>Time budget (s)</span><input type="number" id="time-budget" value="{{ defaults['ASK_TIME_BUDGET_SEC'] }}" min="30" max="900" step="15" /></label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Page viewer modal -->
+    <div id="page-viewer" style="display:none; position:fixed; inset:0; z-index:2200; align-items:center; justify-content:center;">
+      <div class="doc-backdrop" style="position:absolute; inset:0; background:rgba(0,0,0,0.45);"></div>
+      <div style="position:relative; background:#fff; border-radius:12px; box-shadow:0 28px 80px -24px rgba(15,23,42,0.55); max-width:90vw; max-height:90vh; overflow:hidden;">
+        <img id="page-viewer-img" alt="Document page" style="display:block; max-width:90vw; max-height:90vh;">
+      </div>
+    </div>
     <script>
       window.MathJax = {
         tex: {
@@ -817,7 +952,14 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
     </script>
     <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="/static/app.js?v=38"></script>
+    <!-- Document details modal -->
+    <div id="doc-details-modal" class="doc-modal" aria-hidden="true" style="position:fixed; inset:0; display:none; align-items:center; justify-content:center; z-index:2000;">
+      <div class="doc-backdrop" style="position:absolute; inset:0; background:rgba(0,0,0,0.35);"></div>
+      <div class="doc-panel" role="dialog" aria-modal="true" aria-label="Document details" style="position:relative; background:#fff; border-radius:14px; box-shadow:0 30px 80px -20px rgba(0,0,0,0.45); width:min(880px, 92vw); max-height:86vh; overflow:auto;">
+        <div class="doc-inner" style="padding:16px 18px 20px 18px"></div>
+      </div>
+    </div>
+    <script src="/static/app.js?v=43"></script>
 <script id="sticky-autosize">
 (function(){
   const root = document.documentElement;

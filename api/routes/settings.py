@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from api.auth.middleware import require_auth
 from api.db.models import User
 from api.core.config import load_config, present_keys, save_secret
+import httpx
 
 router = APIRouter(prefix="/api", tags=["settings"])
 
@@ -116,6 +117,7 @@ def _settings_defaults_for_user(user_id: str) -> Dict[str, Any]:
         "HF_TOKEN": pick("HF_TOKEN", ""),
         "SERPAPI_KEY": pick("SERPAPI_KEY", ""),
         "BRAVE_API_KEY": pick("BRAVE_API_KEY", ""),
+        "WEB_SEARCH_PROVIDER": (secrets.get("WEB_SEARCH_PROVIDER") or env.get("WEB_SEARCH_PROVIDER") or "auto").lower(),
         "OPENAI_CHAT_MODEL": secrets.get("OPENAI_CHAT_MODEL") or env.get("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
         "HF_LLM_NAME": secrets.get("HF_LLM_NAME") or env.get("HF_LLM_NAME", "TinyLlama/TinyLlama-1.1B-Chat-v1.0"),
         "EMBED_BACKEND": secrets.get("EMBED_BACKEND") or "hf",
@@ -134,23 +136,123 @@ def _settings_defaults_for_user(user_id: str) -> Dict[str, Any]:
     }
 
 
-def user_key_status(user_id: str) -> Dict[str, bool]:
+def _verify_openai_key(key: str) -> Optional[bool]:
+    if not key:
+        return False
+    try:
+        r = httpx.get(
+            "https://api.openai.com/v1/models",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=5.0,
+        )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return None
+    except Exception:
+        return None
+
+
+def _verify_hf_token(token: str) -> Optional[bool]:
+    if not token:
+        return False
+    try:
+        r = httpx.get(
+            "https://huggingface.co/api/whoami-v2",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5.0,
+        )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return None
+    except Exception:
+        return None
+
+
+def _verify_serpapi_key(key: str) -> Optional[bool]:
+    if not key:
+        return False
+    try:
+        r = httpx.get(
+            "https://serpapi.com/account",
+            params={"api_key": key},
+            headers={"Accept": "application/json"},
+            timeout=5.0,
+        )
+        if r.status_code != 200:
+            return None if r.status_code >= 500 else False
+        try:
+            data = r.json()
+        except Exception:
+            return None
+        return False if isinstance(data, dict) and data.get("error") else True
+    except Exception:
+        return None
+
+
+def _verify_brave_key(key: str) -> Optional[bool]:
+    if not key:
+        return False
+    try:
+        r = httpx.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            params={"q": "anagnosis", "count": 1},
+            headers={"X-Subscription-Token": key, "Accept": "application/json"},
+            timeout=5.0,
+        )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return None
+    except Exception:
+        return None
+
+
+def user_key_status(user_id: str, verify: bool = False, defaults: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     s = read_user_secrets(user_id)
     if not s:
-        # fallback to global key presence
         keys = present_keys()
-        return {
-            "openai": bool(keys.get("OPENAI_API_KEY")),
-            "hf": bool(keys.get("HF_TOKEN")),
-            "serpapi": bool(keys.get("SERPAPI_KEY")),
-            "brave": bool(keys.get("BRAVE_API_KEY")),
+        s = {
+            "OPENAI_API_KEY": keys.get("OPENAI_API_KEY") and "present" or "",
+            "HF_TOKEN": keys.get("HF_TOKEN") and "present" or "",
+            "SERPAPI_KEY": keys.get("SERPAPI_KEY") and "present" or "",
+            "BRAVE_API_KEY": keys.get("BRAVE_API_KEY") and "present" or "",
         }
-    return {
+
+    if defaults is None:
+        defaults = _settings_defaults_for_user(user_id)
+    embed_backend = (defaults.get("EMBED_BACKEND") or "hf").lower()
+    llm_backend = (defaults.get("LLM_BACKEND") or "openai").lower()
+    web_provider = (defaults.get("WEB_SEARCH_PROVIDER") or "auto").lower()
+
+    required = {
+        "openai": (llm_backend == "openai") or (embed_backend == "openai"),
+        "hf": (llm_backend == "vllm") or (embed_backend == "hf"),
+        "serpapi": (web_provider == "serpapi"),
+        "brave": (web_provider == "brave"),
+    }
+
+    present = {
         "openai": bool(s.get("OPENAI_API_KEY")),
         "hf": bool(s.get("HF_TOKEN")),
         "serpapi": bool(s.get("SERPAPI_KEY")),
         "brave": bool(s.get("BRAVE_API_KEY")),
     }
+
+    if not verify:
+        return {k: {"present": present[k], "ok": True if present[k] else False, "required": required[k]} for k in present}
+
+    ok = {
+        "openai": _verify_openai_key(str(s.get("OPENAI_API_KEY") or "")),
+        "hf": _verify_hf_token(str(s.get("HF_TOKEN") or "")),
+        "serpapi": _verify_serpapi_key(str(s.get("SERPAPI_KEY") or "")),
+        "brave": _verify_brave_key(str(s.get("BRAVE_API_KEY") or "")),
+    }
+    return {k: {"present": present[k], "ok": ok[k], "required": required[k]} for k in present}
 
 
 def _save_settings_for_user(user_id: str, payload: Dict[str, Any]) -> str:
@@ -168,6 +270,8 @@ def _save_settings_for_user(user_id: str, payload: Dict[str, Any]) -> str:
         secrets["HF_LLM_NAME"] = (payload.get("hf_model", "TinyLlama/TinyLlama-1.1B-Chat-v1.0").strip() or "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
         secrets["EMBED_BACKEND"] = (payload.get("embed_backend") or "hf").lower()
         secrets["LLM_BACKEND"] = (payload.get("llm_backend") or "openai").lower()
+        if (payload.get("web_provider") or "").strip():
+            secrets["WEB_SEARCH_PROVIDER"] = (payload.get("web_provider") or "auto").strip().lower()
         write_user_secrets(user_id, secrets)
 
         prefs = read_user_prefs(user_id)
@@ -193,9 +297,15 @@ def _save_settings_for_user(user_id: str, payload: Dict[str, Any]) -> str:
 
 
 @router.get("/settings")
-async def get_settings(user: User = Depends(require_auth)) -> JSONResponse:
+async def get_settings(request: Request, user: User = Depends(require_auth)) -> JSONResponse:
     defaults = _settings_defaults_for_user(str(user.id))
-    status = user_key_status(str(user.id))
+    verify = False
+    try:
+        q = request.query_params
+        verify = (q.get("verify", "0") in {"1", "true", "yes", "on"})
+    except Exception:
+        verify = False
+    status = user_key_status(str(user.id), verify=verify, defaults=defaults)
     return JSONResponse({"defaults": defaults, "keys": status})
 
 
@@ -207,22 +317,19 @@ async def post_settings(request: Request, user: User = Depends(require_auth)) ->
     key_status = user_key_status(str(user.id))
     return JSONResponse({"message": message, "defaults": status, "keys": key_status})
 
-# Helper to apply (and optionally restore) per-user environment for a single job
 def apply_env_for_user(user_id: str):
     defaults = _settings_defaults_for_user(user_id)
-    # snapshot current env for keys we modify
     touched = {}
     keys = [
         "OPENAI_CHAT_MODEL","HF_LLM_NAME","EMBED_BACKEND","LLM_BACKEND",
         "MEMORY_ENABLED","MEMORY_TOKEN_LIMIT","MEMORY_FILE_LIMIT_MB",
         "OPENAI_TPM","OPENAI_RPM","ASK_BATCH_CHAR_BUDGET","ASK_MAX_BATCHES",
-        "ASK_TIME_BUDGET_SEC","ASK_EXHAUSTIVE","ASK_RERANKER","ASK_CANDIDATES",
+        "ASK_TIME_BUDGET_SEC","ASK_EXHAUSTIVE","ASK_RERANKER","ASK_CANDIDATES","WEB_SEARCH_PROVIDER",
         "OPENAI_API_KEY","HF_TOKEN","SERPAPI_KEY","BRAVE_API_KEY",
     ]
     for k in keys:
         if k in os.environ:
             touched[k] = os.environ[k]
-    # Apply values for this job
     os.environ["OPENAI_CHAT_MODEL"] = str(defaults.get("OPENAI_CHAT_MODEL") or "gpt-4o-mini")
     os.environ["HF_LLM_NAME"] = str(defaults.get("HF_LLM_NAME") or "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
     os.environ["EMBED_BACKEND"] = str(defaults.get("EMBED_BACKEND") or "hf")
@@ -234,16 +341,14 @@ def apply_env_for_user(user_id: str):
         "ASK_BATCH_CHAR_BUDGET","ASK_MAX_BATCHES","ASK_TIME_BUDGET_SEC","ASK_CANDIDATES",
     ):
         os.environ[k] = str(defaults.get(k))
-    # Provider keys
     for k in ("OPENAI_API_KEY","HF_TOKEN","SERPAPI_KEY","BRAVE_API_KEY"):
         v = defaults.get(k)
         if v:
             os.environ[k] = str(v)
         elif k in os.environ:
-            # If not set for this user, leave existing env (global) as is
             pass
+    os.environ["WEB_SEARCH_PROVIDER"] = str(defaults.get("WEB_SEARCH_PROVIDER") or "auto")
     def restore():
-        # restore previous env values for touched keys; unset newly set keys
         current = set(keys)
         for k, v in touched.items():
             os.environ[k] = v

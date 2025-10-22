@@ -183,15 +183,21 @@ def answer_question(
     formula_mode: bool = False,
     agents_enabled: bool = False,
     web_enabled: bool = False,
+    strict_docs: bool = False,
     progress: ProgressFn = None,
     progress_pct: PctFn = None,
     should_cancel: CancelFn = None,
     only_doc: Optional[str] = None,
     user_id: Optional[str] = None,
+    exhaustive: Optional[bool] = None,
+    extra_chunks: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Run the question-answering pipeline synchronously."""
 
     _check_cancel(should_cancel)
+
+    # Keep the original user phrasing for final rendering
+    _orig_user_q = question
 
     base_prefix = (
         "Write normal text and structure in Markdown. "
@@ -228,23 +234,35 @@ def answer_question(
             text = "Here is my previous answer:\n\n" + prev_a
             return {"answer": text, "citations": [], "quotes": []}
 
+    # Simple retrieval augmentation: if the last turn has a question but no answer
+    # (e.g., user cancelled), include it to provide context for pronouns like "his/it".
+    try:
+        if history:
+            _last = history[-1]
+            prev_q = (_last.get("q") or "").strip()
+            prev_a = (_last.get("a") or "").strip()
+            if prev_q and not prev_a:
+                question = f"{prev_q}\nFollow-up: {_orig_user_q}"
+    except Exception:
+        pass
+
     tb_base = int(os.environ.get("ASK_TIME_BUDGET_SEC", "120"))
     tb = int(os.environ.get("ASK_TIME_BUDGET_SEC_FORMULA", "240")) if formula_mode else tb_base
     web_chunks: List[Dict[str, Any]] = []
     web_hits: List[Any] = []
     max_web_overlap = 0.0
-    provider_cfg: Dict[str, Any] = {}
+    provider_label = "duckduckgo"
     try:
-        provider_cfg = load_config() or {}
+        from api.services.websearch import get_provider_name
+        provider_label = get_provider_name() or "duckduckgo"
     except Exception:
-        provider_cfg = {}
-    provider_label = (
-        provider_cfg.get("WEB_SEARCH_PROVIDER")
-        or os.environ.get("WEB_SEARCH_PROVIDER")
-        or "duckduckgo"
-    )
+        pass
 
     if web_enabled:
+        # Web search and strict docs are mutually exclusive; allow both sources by disabling strict
+        if strict_docs:
+            strict_docs = False
+            _emit(progress, "Strict documents disabled due to Web search.")
         _emit(progress, f"Web search ({provider_label})…")
         try:
             web_results = websearch.search_web(question, max_results=6)
@@ -281,32 +299,62 @@ def answer_question(
     doc_reference = bool(re.search(r"(textbook|chapter|section|lecture|notes|\.(pdf|docx))", q_lower))
 
     rel_score, rel_meta = agent.estimate_relevance(question)
-    relevance_threshold = float(os.getenv("ASK_RAG_MIN_RELEVANCE", "0.20"))
     _emit(progress, f"Relevance score: {rel_score if rel_score is not None else 'n/a'}")
-
-    # Default: always use local RAG when web search is OFF. This avoids
-    # over-pruning questions like "What is calculus" that are general but
-    # still benefit from local textbooks.
-    use_rag = not web_enabled
-    if web_enabled:
-        if not web_chunks:
-            use_rag = True
-        elif doc_reference:
-            use_rag = True
-        else:
-            overlap_threshold = float(os.getenv("ASK_WEB_MIN_OVERLAP", "0.45"))
-            use_rag = max_web_overlap < overlap_threshold
-    # Do not disable RAG purely based on the heuristic relevance score when
-    # web search is off; keep RAG on to maximize useful local hits.
-    if web_enabled and rel_score is not None and rel_score < relevance_threshold and not doc_reference:
-        use_rag = False
-
+    # Decide if we should also include local RAG when web is enabled.
+    # Use the same LLM judge logic as strict mode, but as a gate (lenient in that any >0/Relevant passes).
+    lenient_th = float(os.getenv("ASK_WEB_LENIENT_MIN", "0.05"))
+    include_rag = True if not web_enabled else False
     hits: List[Any] = []
+    if web_enabled:
+        include_rag = bool(doc_reference or only_doc)
+        # Heuristic hint before LLM
+        if not include_rag and rel_score is not None:
+            include_rag = (rel_score >= lenient_th)
+        # Run a light local search to feed the LLM gate
+        try:
+            gate_pool = int(os.getenv("ASK_WEB_GATE_CANDIDATES", "80"))
+            st_gate = int(os.getenv("ASK_WEB_GATE_TIMEOUT", "12"))
+            _emit(progress, "Local gate search…")
+            hits = search(
+                question,
+                k=gate_pool,
+                progress_cb=lambda s: _emit(progress, s),
+                timeout_sec=st_gate,
+                pool=gate_pool,
+                only_doc=only_doc,
+                user_id=user_id,
+            )
+            gate_max = int(os.getenv("ASK_STRICT_LLM_MAX_HITS", "24"))
+            gate_chunks = []
+            for sc, ch in hits[:max(1, min(gate_max, len(hits)))] if hits else []:
+                x = dict(ch); x["_score"] = float(sc); gate_chunks.append(x)
+            if gate_chunks:
+                llm_score, meta = agent.llm_relevance_gate(question, gate_chunks, doc_focus=only_doc)
+                decided = None
+                llm_label = meta.get('label') if isinstance(meta, dict) else None
+                if isinstance(llm_label, str):
+                    decided = (llm_label.strip().lower() == 'relevant')
+                elif llm_score is not None:
+                    decided = (float(llm_score) > 0.0)
+                if progress:
+                    try:
+                        detail = ""
+                        if isinstance(meta, dict) and meta.get('ctx_snippets') is not None:
+                            detail = f" • ctx={meta.get('ctx_snippets')} snippets/{meta.get('ctx_chars')} chars"
+                        progress(f"LLM web gate: score={llm_score if llm_score is not None else 'n/a'} label={llm_label or 'n/a'}{detail}")
+                    except Exception:
+                        pass
+                if decided is True:
+                    include_rag = True
+        except Exception:
+            pass
+
     rag_chunks: List[Dict[str, Any]] = []
+    attach_chunks: List[Dict[str, Any]] = list(extra_chunks or [])
     mem_chunks: List[Dict[str, Any]] = []
     rag_scores: List[float] = []
 
-    if use_rag:
+    if (not web_enabled) or include_rag:
         base_pool = int(os.environ.get("ASK_CANDIDATES", "300"))
         pool = int(os.environ.get("ASK_CANDIDATES_FORMULA", "3000")) if formula_mode else base_pool
         pc_holder = {"value": 12}
@@ -323,15 +371,16 @@ def answer_question(
 
         _check_cancel(should_cancel)
         _emit(progress, "Searching index…")
-        hits = search(
-            question,
-            k=pool,
-            progress_cb=s_cb,
-            timeout_sec=st,
-            pool=pool,
-            only_doc=only_doc,
-            user_id=user_id,
-        )
+        if not hits:
+            hits = search(
+                question,
+                k=pool,
+                progress_cb=s_cb,
+                timeout_sec=st,
+                pool=pool,
+                only_doc=only_doc,
+                user_id=user_id,
+            )
         if only_doc and not hits:
             _emit(progress, "No hits in selected document; expanding to all documents…")
             hits = search(
@@ -349,28 +398,153 @@ def answer_question(
             x = dict(ch)
             x["_score"] = float(sc)
             rag_chunks.append(x)
-        if not hits and not web_chunks:
+        if not web_enabled and not hits:
             _emit_pct(progress_pct, 100)
             return {"answer": "**No local results. Try web search.**", "citations": [], "quotes": []}
     else:
-        _emit(progress, "Using web results only…")
-        if not web_chunks:
-            _emit_pct(progress_pct, 100)
-            return {"answer": "**No web results found for this question.**", "citations": [], "quotes": []}
+        _emit(progress, "Skipping local RAG (lenient gate). Using web results.")
+        if web_enabled and not web_chunks:
+            _emit(progress, "Web search returned no results; falling back to local RAG…")
+            try:
+                # run a light search to avoid empty context
+                st_base = max(8, min(tb_base // 3, 20))
+                st = int(os.environ.get("SEARCH_TIMEOUT_SEC", str(st_base)))
+                hits = search(
+                    question,
+                    k=int(os.environ.get("ASK_CANDIDATES", "150")),
+                    progress_cb=lambda s: _emit(progress, s),
+                    timeout_sec=st,
+                    pool=int(os.environ.get("ASK_CANDIDATES", "150")),
+                    only_doc=only_doc,
+                    user_id=user_id,
+                )
+                _emit(progress, f"Fallback Hits: {len(hits)}")
+                for sc, ch in hits[:k]:
+                    x = dict(ch)
+                    x["_score"] = float(sc)
+                    rag_chunks.append(x)
+            except Exception:
+                pass
 
     rag_threshold = float(os.getenv("ASK_WEB_MIN_RAG", "0.35"))
+    strict_answer_min = float(os.getenv("ASK_STRICT_MIN_RAG", "0.35"))
 
-    if web_enabled and web_chunks:
-        if use_rag and rag_scores and rag_scores[0] >= rag_threshold:
-            top_chunks = list(web_chunks) + rag_chunks
-        elif use_rag and rag_chunks:
+    if strict_docs:
+        # Strict mode: use only retrieved document chunks; no web or memory
+        top_chunks = rag_chunks
+        # Numeric guardrails (fallback when LLM is unavailable)
+        overlap_min = float(os.getenv("ASK_STRICT_MIN_OVERLAP", "0.18"))
+        max_overlap = 0.0
+        for c in top_chunks[:max(1, min(10, len(top_chunks)))]:
+            try:
+                max_overlap = max(max_overlap, _token_overlap(question, c.get("text") or ""))
+            except Exception:
+                pass
+        # Keyword coverage across chunks
+        def _q_tokens(s: str):
+            toks = re.findall(r"[a-z0-9]{3,}", (s or '').lower())
+            stop = {"what","which","when","where","why","how","does","do","is","are","was","were","can","could","should","would","will","might","may","the","and","for","from","this","that","these","those","into","about","your","our","their","its","of","to","in","on","at","by","it","we","you","i","a","an","plan","plans","feature","features","user","users","application","app","goal","goals"}
+            return [t for t in toks if t not in stop]
+        qtok = set(_q_tokens(question))
+        covered = set()
+        support_chunks = 0
+        for c in top_chunks[:max(1, min(8, len(top_chunks)))]:
+            txt = (c.get('text') or '').lower()
+            if not txt:
+                continue
+            has = False
+            for t in qtok:
+                if t in txt:
+                    covered.add(t)
+                    has = True
+            if has:
+                support_chunks += 1
+        min_kw = int(os.getenv("ASK_STRICT_MIN_KW", "2"))
+        min_support = int(os.getenv("ASK_STRICT_MIN_SUPPORT", "1"))
+        coverage_ok = (len(covered) >= min_kw)
+        support_ok = (support_chunks >= min_support)
+        numeric_ok = bool(rag_scores) and (rag_scores[0] >= strict_answer_min) and (max_overlap >= overlap_min)
+
+        # LLM relevance adjudicator — primary decision if available
+        llm_score = None
+        llm_label = None
+        llm_reason = None
+        try:
+            # Provide the judge with a wider slice of retrieved context than top-k
+            gate_max = int(os.getenv("ASK_STRICT_LLM_MAX_HITS", "24"))
+            gate_chunks = []
+            for sc, ch in hits[:max(1, min(gate_max, len(hits)))] if hits else []:
+                x = dict(ch)
+                x["_score"] = float(sc)
+                gate_chunks.append(x)
+            src_for_gate = gate_chunks if gate_chunks else top_chunks
+            llm_score, meta = agent.llm_relevance_gate(question, src_for_gate, doc_focus=only_doc)
+            llm_label = meta.get('label') if isinstance(meta, dict) else None
+            llm_reason = meta.get('reason') if isinstance(meta, dict) else None
+            if progress:
+                try:
+                    lbl = f" {llm_label}" if llm_label else ""
+                    detail = ""
+                    if isinstance(meta, dict) and meta.get('ctx_snippets') is not None:
+                        detail = f" • ctx={meta.get('ctx_snippets')} snippets/{meta.get('ctx_chars')} chars"
+                    progress(f"LLM judge: {meta.get('model','?')} score={llm_score if llm_score is not None else 'n/a'}{lbl}{detail}")
+                    if llm_reason:
+                        progress(f"LLM reason: {llm_reason[:180]}")
+                except Exception:
+                    pass
+            # Decision policy: use label if present, else treat 0.0 as Irrelevant, >0.0 as Relevant
+            decided: Optional[bool] = None
+            if isinstance(llm_label, str):
+                decided = (llm_label.strip().lower() == 'relevant')
+            elif llm_score is not None:
+                decided = (float(llm_score) > 0.0)
+            if decided is None:
+                # No LLM score available – fall back to numeric checks
+                if not (numeric_ok and coverage_ok and support_ok):
+                    _emit(progress, f"Strict guard: rag={rag_scores[0] if rag_scores else 'n/a'} ov={max_overlap:.2f} kw={len(covered)} sup={support_chunks} (LLM n/a)")
+                    _emit_pct(progress_pct, 100)
+                    return {"answer": "**I couldn't find relevant information in your documents.**", "citations": [], "quotes": []}
+            elif decided is False:
+                _emit(progress, f"Strict guard: LLM veto — score={llm_score if llm_score is not None else 'n/a'} label={llm_label or 'n/a'}")
+                _emit_pct(progress_pct, 100)
+                msg = (
+                    "**No directly relevant passage found.**\n\n"
+                    "- Broaden to all documents\n"
+                    "- Enable Web search\n"
+                    "- Clarify or upload relevant pages"
+                )
+                return {"answer": msg, "citations": [], "quotes": []}
+            else:
+                _emit(progress, f"Strict guard: LLM pass — score={llm_score if llm_score is not None else 'n/a'} label={llm_label or 'n/a'}")
+        except Exception:
+            # On LLM failure, use numeric gates only
+            if not (numeric_ok and coverage_ok and support_ok):
+                _emit(progress, f"Strict guard: rag={rag_scores[0] if rag_scores else 'n/a'} ov={max_overlap:.2f} kw={len(covered)} sup={support_chunks} (LLM error)")
+                _emit_pct(progress_pct, 100)
+                msg = (
+                    "**No directly relevant passage found.**\n\n"
+                    "- Broaden to all documents\n"
+                    "- Enable Web search\n"
+                    "- Clarify or upload relevant pages"
+                )
+                return {"answer": msg, "citations": [], "quotes": []}
+    elif web_enabled and web_chunks:
+        if include_rag and rag_chunks:
             top_chunks = list(web_chunks) + rag_chunks
         else:
             top_chunks = list(web_chunks)
     else:
         top_chunks = rag_chunks
 
+    # Prepend any extra chunks (e.g., attached image descriptions)
+    if attach_chunks:
+        try:
+            top_chunks = list(attach_chunks) + list(top_chunks or [])
+        except Exception:
+            top_chunks = list(attach_chunks)
+
     # In-session memory (recent turns from current chat) — keep a longer window
+    # Always include memory as context for pronoun/coreference resolution.
     if history:
         for idx, turn in enumerate(history[-16:], 1):
             q_prev = (turn.get("q") or "").strip()
@@ -397,7 +571,7 @@ def answer_question(
                 }
             )
 
-    # Cross-conversation memory from memory.jsonl (always enabled)
+    # Cross-conversation memory from memory file (always include as context)
     try:
         limit = int(os.getenv("MEMORY_TOKEN_LIMIT", "1200"))
         recent = mem.load_recent(limit_tokens=limit, user_id=user_id) or []
@@ -440,23 +614,32 @@ def answer_question(
     except Exception:
         # Memory is best-effort; ignore failures
         pass
-    if mem_chunks:
+    if mem_chunks and not strict_docs:
         top_chunks.extend(mem_chunks)
 
-    if web_enabled and web_chunks and not use_rag:
-        combined_hits = list(web_hits) if web_hits else [(0.0, c) for c in web_chunks]
-    else:
-        base_hits = list(hits)
+    # Start with whatever we have so far; refine per mode below
+    combined_hits = list(hits) if hits else []
+    if attach_chunks:
+        try:
+            combined_hits = [(0.95, ch) for ch in attach_chunks] + combined_hits
+        except Exception:
+            pass
+
+    if strict_docs:
+        combined_hits = list(hits)
+    elif web_enabled:
+        # Always include web chunks; optionally include rag if we ran it
+        base_hits = list(hits) if include_rag else []
         web_extras = web_hits if web_hits else [(0.85, c) for c in web_chunks]
         combined_hits = base_hits + web_extras
-    if mem_chunks:
+    if mem_chunks and not strict_docs:
         combined_hits.extend([(0.55, ch) for ch in mem_chunks])
 
     if formula_mode:
         _check_cancel(should_cancel)
         _emit(progress, "Formula mode: extracting all formulas in scope…")
         total = len(top_chunks)
-        if total < (len(hits) if use_rag else len(web_chunks)):
+        if total < (len(hits) if include_rag else len(web_chunks)):
             _emit(progress, f"Warning: only {total} chunks returned; consider increasing index size or candidate pool.")
 
         def p_cb(msg: str) -> None:
@@ -500,8 +683,22 @@ def answer_question(
         _emit(progress, "Summarizing with context…")
         _emit_pct(progress_pct, 60)
         mb = int(os.environ.get("ASK_MAX_BATCHES", "6"))
-        exhaustive = os.environ.get("ASK_EXHAUSTIVE", "false").lower() in {"1", "true", "yes", "on"}
-        chs = list(top_chunks)
+        ex_env = os.environ.get("ASK_EXHAUSTIVE", "false").lower() in {"1", "true", "yes", "on"}
+        ex_flag = bool(exhaustive) if exhaustive is not None else ex_env
+        # Dedupe similar/duplicate contexts (keep first occurrence per doc/page and near-identical text)
+        def _dedupe(chs):
+            seen = set(); out = []
+            for c in chs:
+                try:
+                    key = (str(c.get('doc_name') or ''), int(c.get('page') or c.get('page_start') or 0))
+                except Exception:
+                    key = (str(c.get('doc_name') or ''), str(c.get('page') or c.get('page_start') or '?'))
+                txt = (c.get('text') or '').strip()
+                sig = (key, txt[:180])
+                if sig in seen: continue
+                seen.add(sig); out.append(c)
+            return out
+        chs = _dedupe(list(top_chunks))
         _check_cancel(should_cancel)
         out = summarize_batched(
             fmt_q,
@@ -510,7 +707,10 @@ def answer_question(
             progress_cb=lambda s: _emit(progress, s),
             max_batches=mb,
             time_budget_sec=tb,
-            exhaustive=exhaustive,
+            exhaustive=ex_flag,
+            strict_docs=strict_docs,
+            orig_question=_orig_user_q,
+            allow_not_found=(False if (web_enabled or (attach_chunks and len(attach_chunks) > 0)) else True),
         )
         if agents_enabled:
             _check_cancel(should_cancel)
@@ -545,6 +745,187 @@ def answer_question(
         pass
 
     _emit_pct(progress_pct, 100)
+
+    # Post-process: ensure not-found responses are clearly formatted in Markdown
+    try:
+        if isinstance(out, dict):
+            ans = (out.get("answer") or "").strip()
+            low = ans.lower()
+            needs_md = ("**" not in ans) and ("- " not in ans)
+            not_found = ("couldn't find relevant" in low) or ("couldn’t find relevant" in low) or ("no directly relevant" in low)
+            if not_found and needs_md:
+                bullets = (
+                    "**No directly relevant passage found.**\n\n"
+                    "- Broaden to all documents\n"
+                    "- Enable Web search\n"
+                    "- Clarify or upload relevant pages"
+                )
+                # If the question invites comparative analysis, add a short general section
+                try:
+                    ql = (question or "").lower()
+                    if any(k in ql for k in ("strength", "weakness", "compare", "versus", "vs ", "trade-off", "tradeoff")):
+                        bullets += "\n\n**General perspective**\n- Typical CS strengths: strong fundamentals, algorithms/data structures, code quality\n- Typical gaps vs seasoned domain profiles: domain context, production scale experience, stakeholder comms"
+                except Exception:
+                    pass
+                out["answer"] = bullets
+    except Exception:
+        pass
+
+    # Lightweight retrieval trace for UI introspection
+    try:
+        def _brief(c: Dict[str, Any]) -> Dict[str, Any]:
+            try:
+                doc = c.get("doc_name") or "?"
+                ps = c.get("page_start") or c.get("page")
+                pe = c.get("page_end") or ps
+                page = int(ps) if isinstance(ps, int) else ps
+                if pe and pe != ps:
+                    page = f"{ps}-{pe}"
+            except Exception:
+                page = c.get("page") or c.get("page_start") or "?"
+                doc = c.get("doc_name") or "?"
+            score = float(c.get("_score") or 0.0)
+            kind = (
+                "web" if c.get("is_web") else
+                "memory" if (c.get("is_memory") or (c.get("doc_name", "") in {"Conversation memory", "Long‑term memory"})) else
+                "doc"
+            )
+            txt = (c.get("text") or "").strip()
+            snip = txt[:220].replace("\n", " ") if txt else ""
+            url = c.get("web_url") if kind == "web" else None
+            viewer = False
+            try:
+                if (kind == "doc") and user_id and doc:
+                    base = pathlib.Path("artifacts") / "docs" / str(user_id) / pathlib.Path(str(doc)).name
+                    viewer = base.exists() and str(base.suffix or '').lower() == '.pdf'
+            except Exception:
+                viewer = False
+            # Provide a short "needle" text to locate on the page for highlights
+            needle = (txt or "").strip().replace("\n", " ")[:160]
+            return {
+                "doc": doc,
+                "page": page,
+                "score": round(score, 4),
+                "kind": kind,
+                "snippet": snip,
+                "url": url,
+                "viewer": viewer,
+                "needle": needle,
+            }
+
+        rr_name = str(os.environ.get("ASK_RERANKER", "off") or "off").lower()
+        rr_applied = rr_name not in {"off", "none", ""}
+        trace: Dict[str, Any] = {
+            "only_doc": only_doc,
+            "strict_docs": bool(strict_docs),
+            "web_enabled": bool(web_enabled),
+            "agents_enabled": bool(agents_enabled),
+            "reranker": rr_name,
+            "rerank_applied": bool(rr_applied),
+            "retrieval": [
+                {
+                    "doc": (ch.get("doc_name") or "?"),
+                    "page": (ch.get("page_start") or ch.get("page") or "?"),
+                    "score": round(float(sc or 0.0), 4),
+                    "kind": ("web" if (getattr(ch, 'get', None) and ch.get('is_web')) else "doc"),
+                }
+                for sc, ch in (hits[:10] or [])
+            ],
+            "selected_context": [_brief(c) for c in (top_chunks[:10] if top_chunks else [])],
+            "web_sources": [c.get("web_url") for c in (web_chunks[:8] if web_chunks else []) if c.get("web_url")],
+        }
+        # Simple compare lists to visualize any ordering change
+        try:
+            trace["retrieval_head"] = [f"{(x.get('doc') or '?')} p.{(x.get('page') or '?')}" for x in trace.get("retrieval", [])[:5]]
+            trace["selected_head"] = [f"{(x.get('doc') or '?')} p.{(x.get('page') or '?')}" for x in trace.get("selected_context", [])[:5]]
+        except Exception:
+            pass
+        # Compute movement deltas for first N items
+        try:
+            def _key(d):
+                return f"{d.get('doc') or '?'}|{d.get('page') or '?'}"
+            old = { _key(x): i for i, x in enumerate(trace.get('retrieval', [])[:10]) }
+            new = { _key(x): i for i, x in enumerate(trace.get('selected_context', [])[:10]) }
+            moves = []
+            for k, i_old in old.items():
+                if k in new:
+                    i_new = new[k]
+                    delta = int(i_old) - int(i_new)
+                    if delta != 0:
+                        moves.append({"key": k, "old": int(i_old), "new": int(i_new), "delta": delta})
+            moves.sort(key=lambda m: -abs(m.get('delta',0)))
+            trace['rerank_moves'] = moves
+        except Exception:
+            pass
+    except Exception:
+        trace = {}
+
+    if isinstance(out, dict):
+        # Attach trace if available and include evidence quotes in trace
+        try:
+            if trace:
+                # Add quotes (evidence) into the trace for UI display
+                quotes = out.get("quotes") if isinstance(out.get("quotes"), list) else []
+                if quotes:
+                    trace["quotes"] = quotes
+                # Citation validator: check overlap with selected context
+                try:
+                    checks = []
+                    ans = (out.get('answer') or '')
+                    def _parse_cite(tag):
+                        import re
+                        m = re.match(r"^\[([^]]+?)\s+p\.(.+)\]$", tag or "")
+                        if not m: return None, []
+                        doc = m.group(1); pages = []
+                        for part in str(m.group(2)).split(','):
+                            part = part.strip().replace('–','-')
+                            if '-' in part:
+                                a,b = part.split('-',1)
+                                try:
+                                    a=int(a); b=int(b)
+                                    pages.extend(list(range(min(a,b), max(a,b)+1)))
+                                except Exception: pass
+                            else:
+                                try: pages.append(int(part))
+                                except Exception: pass
+                        return doc, pages
+                    ctx = trace.get('selected_context') or []
+                    for tag in out.get('citations') or []:
+                        doc, pages = _parse_cite(tag)
+                        if not doc or not pages:
+                            checks.append({'tag': tag, 'ok': False, 'reason': 'unparsed'})
+                            continue
+                        ok = False
+                        for c in ctx:
+                            if (c.get('doc') == doc) and (str(c.get('page')) in {str(p) for p in pages}):
+                                try:
+                                    ov = _token_overlap(ans, c.get('snippet') or '')
+                                    if ov >= 0.15: ok = True; break
+                                except Exception:
+                                    pass
+                        checks.append({'tag': tag, 'ok': bool(ok)})
+                    trace['citation_check'] = checks
+                except Exception:
+                    pass
+                out.setdefault("trace", trace)
+        except Exception:
+            pass
+
+    if isinstance(out, dict):
+        try:
+            ans_low = (out.get('answer') or '').lower()
+            nf = ('not found in sources' in ans_low) or ("couldn’t find relevant" in ans_low) or ("couldn't find relevant" in ans_low)
+            meta = out.get('meta') if isinstance(out.get('meta'), dict) else {}
+            if nf:
+                meta['not_found'] = True
+                if only_doc:
+                    meta['suggest_broaden'] = True
+                if not web_enabled:
+                    meta['suggest_web'] = True
+            if meta:
+                out['meta'] = meta
+        except Exception:
+            pass
 
     if isinstance(out, dict) and web_enabled and web_chunks:
         try:

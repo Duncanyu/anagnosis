@@ -16,8 +16,9 @@ def _norm_rows(a):
 
 def _embed_openai(texts, model, batch_size, progress_cb=None):
     from openai import OpenAI
-    cfg = load_config()
-    client = OpenAI(api_key=cfg.get("OPENAI_API_KEY"))
+    cfg = load_config() or {}
+    import os
+    client = OpenAI(api_key=(cfg.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")))
     out = []
     i = 0
     total = len(texts)
@@ -42,7 +43,16 @@ def _embed_openai(texts, model, batch_size, progress_cb=None):
 
 def _embed_hf(texts, model_name, progress_cb=None):
     from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer(model_name)
+    # Lightweight cache to avoid reloading the same HF model repeatedly
+    global _HF_MODELS
+    try:
+        _HF_MODELS
+    except NameError:
+        _HF_MODELS = {}
+    model = _HF_MODELS.get(model_name)
+    if model is None:
+        model = SentenceTransformer(model_name)
+        _HF_MODELS[model_name] = model
     out = []
     bs = 64
     total = len(texts)
@@ -69,3 +79,18 @@ def embed_texts(texts, show_progress_bar=False, normalize_embeddings=True, progr
     if normalize_embeddings:
         arr = _norm_rows(arr)
     return arr
+
+def embed_texts_with(texts, *, backend: str, model: str, progress_cb=None):
+    """Embed texts using a specific backend/model, ignoring global config.
+
+    - backend: 'openai' or 'hf'
+    - model: embedding model name for the backend
+    """
+    backend = (backend or "hf").lower()
+    if backend == "openai":
+        batch_size = 128
+        arr = _embed_openai(texts, model, batch_size, progress_cb=progress_cb)
+        return _norm_rows(arr)
+    else:
+        arr = _embed_hf(texts, model, progress_cb=progress_cb)
+        return arr if arr is not None else np.zeros((0, 384), dtype="float32")
