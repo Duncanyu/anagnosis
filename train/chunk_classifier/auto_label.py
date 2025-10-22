@@ -9,8 +9,8 @@ if __package__ is None or __package__ == "":
     import pathlib
 
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
-    from utils.dataset import load_jsonl  # type: ignore
-    from utils.logging import banner, log_kv  # type: ignore
+    from utils.dataset import load_jsonl
+    from utils.logging import banner, log_kv
 else:
     from ..utils.dataset import load_jsonl
     from ..utils.logging import banner, log_kv

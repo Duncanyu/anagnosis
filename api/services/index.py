@@ -1,7 +1,7 @@
 import json, pathlib, re, math, hashlib, os, time
 import numpy as np
 import faiss
-from api.services.embed import embed_texts, embedding_info
+from api.services.embed import embed_texts, embedding_info, embed_texts_with
 from api.core.config import load_config
 from api.services import formula_cls
 from api.services import agent
@@ -258,7 +258,8 @@ def _mmr_select_vectors(qv, dvs, base_scores, k=5, lambda_weight=0.7):
 def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None, only_doc=None, user_id=None):
     idx_path, _, _, _, _, _ = _active_paths()
     if not idx_path.exists():
-        return []
+        out = search_all_namespaces(text, k=k, progress_cb=progress_cb, timeout_sec=timeout_sec, pool=pool, only_doc=only_doc, user_id=user_id)
+        return out
     t_end = time.time() + float(timeout_sec) if timeout_sec and timeout_sec > 0 else None
     if progress_cb:
         progress_cb("Search: encoding query")
@@ -279,7 +280,6 @@ def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None, only_doc=No
         if user_id and row.get("user_id") != str(user_id):
             continue
         if only_doc:
-            # Filter by normalized filename match
             try:
                 od = pathlib.Path(str(only_doc)).name.lower()
             except Exception:
@@ -291,7 +291,8 @@ def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None, only_doc=No
         cand_ids.append(int(j))
         emb_scores.append(float(max(0.0, s)))
     if not cand_rows:
-        return []
+        out = search_all_namespaces(text, k=k, progress_cb=progress_cb, timeout_sec=timeout_sec, pool=pool, only_doc=only_doc, user_id=user_id)
+        return out
     emb_scores = np.array(emb_scores, dtype=float)
     if emb_scores.max() > 0:
         emb_scores = emb_scores / emb_scores.max()
@@ -395,11 +396,344 @@ def search(text, k=5, progress_cb=None, timeout_sec=None, pool=None, only_doc=No
         out = agent.verify_answer(text, out)
     return out
 
+def _load_meta(meta_path):
+    try:
+        if meta_path.exists():
+            return json.loads(meta_path.read_text(encoding='utf-8'))
+    except Exception:
+        pass
+    return {}
+
+def _rows_from_chunks(ch_path):
+    rows = []
+    try:
+        if ch_path.exists():
+            with ch_path.open('r', encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        rows.append(json.loads(line))
+                    except Exception:
+                        pass
+    except Exception:
+        return []
+    return rows
+
+def _search_in_namespace(text, k, *, idx_path, meta_path, ch_path, user_id=None, only_doc=None, pool=None, progress_cb=None, timeout_sec=None):
+    try:
+        if not idx_path.exists() or not ch_path.exists():
+            return []
+        meta = _load_meta(meta_path)
+        backend = (meta.get('backend') or 'hf').lower()
+        model = meta.get('model') or ('text-embedding-3-small' if backend == 'openai' else 'intfloat/e5-small-v2')
+        if progress_cb:
+            progress_cb(f"Search[{backend}]: encoding query")
+        qv = embed_texts_with([text], backend=backend, model=model, progress_cb=None)
+        if qv is None or qv.shape[0] == 0:
+            return []
+        if progress_cb:
+            progress_cb("Search: loading index")
+        idx = faiss.read_index(str(idx_path))
+        if pool is None:
+            pool = max(128, k)
+        if progress_cb:
+            progress_cb(f"Search: FAISS top-{pool}")
+        D, I = idx.search(qv, pool)
+        rows_all = _rows_from_chunks(ch_path)
+        cand_rows, cand_ids, emb_scores = [], [], []
+        for j, s in zip(I[0], D[0]):
+            if j < 0 or j >= len(rows_all):
+                continue
+            row = rows_all[j]
+            if user_id and str(row.get('user_id') or '') != str(user_id):
+                continue
+            if only_doc:
+                try:
+                    od = pathlib.Path(str(only_doc)).name.lower()
+                except Exception:
+                    od = str(only_doc).lower()
+                dn = pathlib.Path(str(row.get('doc_name') or '')).name.lower()
+                if dn != od:
+                    continue
+            cand_rows.append(row)
+            cand_ids.append(int(j))
+            emb_scores.append(float(max(0.0, s)))
+        if not cand_rows:
+            return []
+        emb_scores = np.array(emb_scores, dtype=float)
+        if emb_scores.max() > 0:
+            emb_scores = emb_scores / emb_scores.max()
+        bm25 = _bm25_scores(text, cand_rows)
+        fflag = _is_formula_query(text)
+        # Light bonuses as in main search
+        eq_bonus = np.array([0.12 if r.get("is_equation") else 0.0 for r in cand_rows], dtype=float)
+        ex_pen = np.array([-0.10 if (r.get("section_tag") or "").lower() == "exercises" else 0.0 for r in cand_rows], dtype=float)
+        kw_terms = ("theorem","lemma","corollary","axiom","law","rule","identity","property","postulate","proposition")
+        kw_bonus = np.array([0.08 if any(k in (r.get("text","" ).lower()) for k in kw_terms) else 0.0 for r in cand_rows], dtype=float)
+        if fflag:
+            fb = []
+            for r in cand_rows:
+                if r.get('is_formula'):
+                    p = float(r.get('formula_confidence') or 0.0)
+                    fb.append(0.35 * max(0.0, min(1.0, p)))
+                else:
+                    fb.append(-0.5)
+            form_bonus = np.array(fb, dtype=float)
+        else:
+            form_bonus = np.zeros(len(cand_rows), dtype=float)
+        hybrid = 0.7 * emb_scores + 0.3 * bm25 + eq_bonus + ex_pen + kw_bonus + form_bonus
+        order = np.argsort(-hybrid)[:k]
+        out = [(float(hybrid[i]), cand_rows[i]) for i in order]
+        return out
+    except Exception:
+        return []
+
+def search_all_namespaces(text, k=5, progress_cb=None, timeout_sec=None, pool=None, only_doc=None, user_id=None):
+    results = []
+    for idx_path, meta_path, ch_path in _namespace_files():
+        out_ns = _search_in_namespace(text, k, idx_path=idx_path, meta_path=meta_path, ch_path=ch_path, user_id=user_id, only_doc=only_doc, pool=pool, progress_cb=progress_cb, timeout_sec=timeout_sec)
+        if out_ns:
+            results.extend(out_ns)
+    # Deduplicate by chunk identity (rid + doc_name) while keeping best score
+    best = {}
+    for score, row in results:
+        key = (row.get('rid'), row.get('doc_name'))
+        if key not in best or score > best[key][0]:
+            best[key] = (score, row)
+    merged = sorted(best.values(), key=lambda x: -x[0])[:k]
+    # Optional: agent verify
+    if _agent_enabled() and merged:
+        merged = agent.verify_answer(text, merged)
+    return merged
+
 def list_chunks(user_id=None):
     all_chunks = _all_chunks()
     if user_id:
         return [c for c in all_chunks if c.get("user_id") == str(user_id)]
     return all_chunks
+
+def _namespace_files():
+    """Yield tuples of (idx_path, meta_path, ch_path) for all namespaces.
+
+    Includes legacy (chunks.jsonl, index.faiss, meta.json) and all chunks_*.jsonl files.
+    """
+    base = pathlib.Path("artifacts")
+    # Legacy
+    l_idx, l_meta, l_ch = _legacy_paths()
+    if l_idx.exists() or l_meta.exists() or l_ch.exists():
+        yield (l_idx, l_meta, l_ch)
+    # Namespaced
+    for ch in sorted(base.glob("chunks_*.jsonl")):
+        key = ch.name[len("chunks_"):].rsplit(".", 1)[0]
+        idx = base / f"index_{key}.faiss"
+        meta = base / f"meta_{key}.json"
+        yield (idx, meta, ch)
+
+def list_chunks_all_namespaces(user_id=None):
+    """List chunks across all namespace files (all embedding backends).
+
+    This scans artifacts/ for legacy chunks.jsonl and all chunks_*.jsonl files
+    so that library views don't depend on the currently active backend.
+    """
+    base = pathlib.Path("artifacts")
+    files = []
+    legacy = base / "chunks.jsonl"
+    if legacy.exists():
+        files.append(legacy)
+    files.extend(sorted(base.glob("chunks_*.jsonl")))
+    rows = []
+    for p in files:
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        rows.append(json.loads(line))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    if user_id:
+        return [r for r in rows if str(r.get("user_id") or "") == str(user_id)]
+    return rows
+
+def _rebuild_namespace(idx_path: pathlib.Path, meta_path: pathlib.Path, ch_path: pathlib.Path, keep_rows):
+    """Rebuild a specific namespace's FAISS index and chunks file from rows.
+
+    Attempts vector reconstruction from the existing index. Falls back to
+    clearing to an empty index if reconstruction is unavailable.
+    """
+    # If there is no index, clear artifacts for this namespace
+    if not idx_path.exists():
+        # Rewrite chunks file with new sequential rids
+        with ch_path.open('w', encoding='utf-8') as f:
+            for new_rid, row in enumerate(keep_rows or []):
+                obj = dict(row); obj['rid'] = new_rid
+                f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        # Update meta with count only if present
+        m = {}
+        try:
+            if meta_path.exists():
+                m = json.loads(meta_path.read_text(encoding='utf-8'))
+        except Exception:
+            m = {}
+        m['count'] = len(keep_rows or [])
+        try:
+            meta_path.write_text(json.dumps(m, indent=2), encoding='utf-8')
+        except Exception:
+            pass
+        return
+
+    index = faiss.read_index(str(idx_path))
+    dim = index.d
+    # Collect original rids in order of keep_rows
+    keep_ids = []
+    kr = []
+    for r in keep_rows or []:
+        try:
+            rid = int(r.get('rid'))
+        except Exception:
+            rid = None
+        if rid is None or rid < 0:
+            continue
+        keep_ids.append(rid)
+        kr.append(r)
+    # Reconstruct kept vectors
+    dvs = _reconstruct_batch(index, keep_ids)
+    if dvs is None:
+        # Fallback: write empty index and chunks; safer than re-embedding with wrong backend
+        new_index = faiss.IndexFlatIP(dim)
+        faiss.write_index(new_index, str(idx_path))
+        with ch_path.open('w', encoding='utf-8') as f:
+            pass
+        m = {}
+        try:
+            if meta_path.exists():
+                m = json.loads(meta_path.read_text(encoding='utf-8'))
+        except Exception:
+            m = {}
+        m['count'] = 0
+        try:
+            meta_path.write_text(json.dumps(m, indent=2), encoding='utf-8')
+        except Exception:
+            pass
+        return
+    # Write rebuilt index
+    new_index = faiss.IndexFlatIP(dim)
+    if len(dvs) > 0:
+        new_index.add(dvs)
+    faiss.write_index(new_index, str(idx_path))
+    # Update meta count only (preserve other fields)
+    m = {}
+    try:
+        if meta_path.exists():
+            m = json.loads(meta_path.read_text(encoding='utf-8'))
+    except Exception:
+        m = {}
+    m['count'] = len(kr)
+    try:
+        meta_path.write_text(json.dumps(m, indent=2), encoding='utf-8')
+    except Exception:
+        pass
+    # Rewrite chunks file with new sequential rids
+    with ch_path.open('w', encoding='utf-8') as f:
+        for new_rid, row in enumerate(kr):
+            obj = dict(row); obj['rid'] = new_rid
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+def remove_documents_for_user(doc_names, *, user_id: str) -> int:
+    """Remove documents for a given user across all namespaces.
+
+    Returns total number of removed rows.
+    """
+    names = {pathlib.Path(str(n)).name for n in (doc_names or []) if str(n).strip()}
+    if not names:
+        return 0
+    total_removed = 0
+    for idx_path, meta_path, ch_path in _namespace_files():
+        # Load rows from this namespace
+        rows = []
+        try:
+            if ch_path.exists():
+                with ch_path.open('r', encoding='utf-8') as f:
+                    for line in f:
+                        try:
+                            rows.append(json.loads(line))
+                        except Exception:
+                            pass
+        except Exception:
+            rows = []
+        if not rows:
+            continue
+        keep = []
+        removed_here = 0
+        for r in rows:
+            uid = str(r.get('user_id') or '')
+            doc = pathlib.Path(str(r.get('doc_name') or '')).name
+            if uid == str(user_id) and doc in names:
+                removed_here += 1
+                continue
+            keep.append(r)
+        if removed_here > 0:
+            total_removed += removed_here
+            _rebuild_namespace(idx_path, meta_path, ch_path, keep)
+    return total_removed
+
+def clear_documents_for_user(*, user_id: str) -> int:
+    """Remove all documents for a given user across all namespaces.
+
+    Returns total number of removed rows.
+    """
+    total_removed = 0
+    for idx_path, meta_path, ch_path in _namespace_files():
+        rows = []
+        try:
+            if ch_path.exists():
+                with ch_path.open('r', encoding='utf-8') as f:
+                    for line in f:
+                        try:
+                            rows.append(json.loads(line))
+                        except Exception:
+                            pass
+        except Exception:
+            rows = []
+        if not rows:
+            continue
+        keep = []
+        removed_here = 0
+        for r in rows:
+            uid = str(r.get('user_id') or '')
+            if uid == str(user_id):
+                removed_here += 1
+                continue
+            keep.append(r)
+        if removed_here > 0:
+            total_removed += removed_here
+            _rebuild_namespace(idx_path, meta_path, ch_path, keep)
+    return total_removed
+
+def clear_all_documents() -> int:
+    """Remove all documents across all users and namespaces.
+
+    Rebuilds each namespace to an empty index and chunks file. Returns total
+    number of removed rows across all namespaces.
+    """
+    total_removed = 0
+    for idx_path, meta_path, ch_path in _namespace_files():
+        rows = []
+        try:
+            if ch_path.exists():
+                with ch_path.open('r', encoding='utf-8') as f:
+                    for line in f:
+                        try:
+                            rows.append(json.loads(line))
+                        except Exception:
+                            pass
+        except Exception:
+            rows = []
+        removed_here = len(rows)
+        # Rebuild this namespace with no rows
+        _rebuild_namespace(idx_path, meta_path, ch_path, keep_rows=[])
+        total_removed += removed_here
+    return total_removed
 
 def rebuild_index_from_rows(keep_rows, progress_cb=None):
     """Rebuild the FAISS index and chunks file from already-existing rows.

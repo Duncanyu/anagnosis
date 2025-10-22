@@ -15,6 +15,7 @@ import uuid
 from typing import Any, Dict, List, Sequence
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+import os, time, logging
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -43,6 +44,39 @@ templates = Jinja2Templates(directory=str(ROOT / "web" / "templates"))
 # Serve static assets (CSS/JS) and the project icon located at ROOT/assets
 app.mount("/static", StaticFiles(directory=str(ROOT / "web" / "static")), name="static")
 app.mount("/assets", StaticFiles(directory=str(ROOT / "assets")), name="assets")
+
+# Internal API base for server-side calls (auth check, etc.)
+# Prefer explicit env; fallback to docker service DNS if inside a container; else localhost
+def _detect_in_docker() -> bool:
+    try:
+        return pathlib.Path('/.dockerenv').exists()
+    except Exception:
+        return False
+
+API_INTERNAL_BASE = os.environ.get("API_INTERNAL_BASE") or (
+    "http://api:8000" if _detect_in_docker() else "http://localhost:8000"
+)
+
+def _setup_logging():
+    level = os.getenv("LOG_LEVEL", "INFO").upper()
+    level_map = {
+        "CRITICAL": logging.CRITICAL,
+        "ERROR": logging.ERROR,
+        "WARNING": logging.WARNING,
+        "INFO": logging.INFO,
+        "DEBUG": logging.DEBUG,
+        "TRACE": logging.DEBUG,
+    }
+    log_level = level_map.get(level, logging.INFO)
+    try:
+        logging.getLogger().setLevel(log_level)
+        logging.getLogger("uvicorn").setLevel(log_level)
+        logging.getLogger("uvicorn.error").setLevel(log_level)
+        logging.getLogger("uvicorn.access").setLevel(log_level)
+    except Exception:
+        pass
+
+_setup_logging()
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +142,7 @@ def _settings_defaults() -> Dict[str, Any]:
         "HF_TOKEN": cfg.get("HF_TOKEN", ""),
         "SERPAPI_KEY": cfg.get("SERPAPI_KEY", ""),
         "BRAVE_API_KEY": cfg.get("BRAVE_API_KEY") or cfg.get("BRAVE_SEARCH_KEY", ""),
+        "WEB_SEARCH_PROVIDER": (cfg.get("WEB_SEARCH_PROVIDER") or env.get("WEB_SEARCH_PROVIDER") or "auto").lower(),
         "OPENAI_CHAT_MODEL": cfg.get("OPENAI_CHAT_MODEL") or env.get("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
         "HF_LLM_NAME": cfg.get("HF_LLM_NAME") or env.get("HF_LLM_NAME", "TinyLlama/TinyLlama-1.1B-Chat-v1.0"),
         "EMBED_BACKEND": cfg.get("EMBED_BACKEND", "hf"),
@@ -140,6 +175,8 @@ def _save_settings(payload: Dict[str, Any]) -> str:
         save_secret("HF_LLM_NAME", payload.get("hf_model", "TinyLlama/TinyLlama-1.1B-Chat-v1.0").strip() or "TinyLlama/TinyLlama-1.1B-Chat-v1.0", prefer="file")
         save_secret("EMBED_BACKEND", (payload.get("embed_backend") or "hf").lower(), prefer="file")
         save_secret("LLM_BACKEND", (payload.get("llm_backend") or "openai").lower(), prefer="file")
+        if (payload.get("web_provider") or "").strip():
+            save_secret("WEB_SEARCH_PROVIDER", payload.get("web_provider").strip().lower(), prefer="file")
 
         prefs = read_prefs()
         prefs.update(
@@ -256,12 +293,31 @@ def _format_answer(question: str, result: Dict[str, Any], agents_enabled: bool) 
     answer = result.get("answer", "") if isinstance(result, dict) else str(result)
     citations = result.get("citations") if isinstance(result, dict) else []
     quotes = result.get("quotes") if isinstance(result, dict) else []
-    cite_block = f"\n\n**Citations:** {', '.join(citations)}" if citations else ""
-    quote_block = _format_quotes(quotes)
+    cite_block = ""
+    if citations:
+        body_lower = (answer or "").lower()
+        if not ("**citations:**" in body_lower or "citations:" in body_lower):
+            cite_block = f"\n\n**Citations:** {', '.join(sorted(set(citations)))}"
+    # Move evidence snippets into the trace chip; do not inline in the main answer
+    quote_block = ""
     agent_block = _format_agent_diag(result if isinstance(result, dict) else {}, agents_enabled)
     body = (answer or "").strip()
-    if question and body and not body.lstrip().startswith("#"):
-        body = f"### {question}\n\n" + body
+    # Enforce readable Markdown when model returns a plain blob
+    try:
+        blob = (answer or "").strip()
+        has_md = bool(re.search(r"(^#|\n\s*[-*]|\n\s*\d+\.|```|\*\*|\|)", blob, flags=re.M))
+        if not has_md and len(blob) > 120:
+            sents = re.split(r"(?<=[\.!?])\s+", blob)
+            sents = [s.strip() for s in sents if s.strip()]
+            if sents:
+                head = sents[0]
+                bullets = sents[1:6]
+                rebuilt = f"**{head}**" + ("\n\n" + "\n".join(f"- {b}" for b in bullets) if bullets else "")
+                body = rebuilt
+    except Exception:
+        pass
+
+    # Do not echo the user's question; keep model-provided headings as-is.
     return body + cite_block + quote_block + agent_block
 
 
@@ -496,6 +552,7 @@ def _answer_question(payload: Dict[str, Any]) -> Dict[str, Any]:
     formula_mode = bool(payload.get("formula_mode"))
     agents_enabled = bool(payload.get("agents_enabled"))
     web_enabled = bool(payload.get("web_enabled"))
+    strict_docs = bool(payload.get("strict_docs"))
     top_k = int(payload.get("top_k") or 10)
     only_doc = (payload.get("only_doc") or "").strip() or None
 
@@ -513,6 +570,7 @@ def _answer_question(payload: Dict[str, Any]) -> Dict[str, Any]:
             formula_mode=formula_mode,
             agents_enabled=agents_enabled,
             web_enabled=web_enabled,
+            strict_docs=strict_docs,
             progress=log,
             only_doc=only_doc,
         )
@@ -736,8 +794,6 @@ def _remove_from_catalog(names: Sequence[str]) -> None:
 
 def _library_inventory() -> List[Dict[str, Any]]:
     catalog = _load_library_catalog()
-    # Merge summaries onto existing catalog entries only; do not create new
-    # records from headings like "High-level overview".
     summaries = _load_library_summaries()
     for key, info in summaries.items():
         entry = catalog.get(key)
@@ -748,7 +804,6 @@ def _library_inventory() -> List[Dict[str, Any]]:
         entry.setdefault("ingested_at", info.get("ts"))
 
     stats = _scan_chunk_stats()
-    # Merge stats into catalog
     for key, info in stats.items():
         entry = catalog.get(key)
         if entry is None:
@@ -803,7 +858,6 @@ def _remove_documents(doc_names: Sequence[str]) -> int:
     names = {_catalog_key(n) for n in doc_names if n}
     if not names:
         return 0
-    # Track whether any entry exists in catalog; used as soft success if chunks file missing
     catalog = _load_library_catalog()
     existed = any(k in catalog for k in names)
     rows: List[Dict[str, Any]] = []
@@ -825,11 +879,9 @@ def _remove_documents(doc_names: Sequence[str]) -> int:
         if removed > 0:
             index_service.clear_index()
     if rows:
-        # Fast path: rebuild index from kept rows without re-embedding
         try:
             index_service.rebuild_index_from_rows(rows)
         except Exception:
-            # Fallback to re-embedding if reconstruct path fails
             sanitized: List[Dict[str, Any]] = []
             for row in rows:
                 row = dict(row)
@@ -839,10 +891,6 @@ def _remove_documents(doc_names: Sequence[str]) -> int:
     _prune_doc_summaries(doc_names)
     _remove_from_catalog([_normalize_doc_name(name) for name in doc_names])
     return removed if removed > 0 else (1 if existed else 0)
-
-
-# ---------------------------------------------------------------------------
-# Ask job management (for live logging)
 
 ASK_JOBS: Dict[str, Dict[str, Any]] = {}
 ASK_LOCK = threading.Lock()
@@ -883,7 +931,6 @@ def _start_ask_job(payload: Dict[str, Any]) -> str:
 
     def worker() -> None:
         try:
-            # Mirror environment and parameters from _answer_question
             question = (payload.get("question") or "").strip()
             if not question:
                 raise HTTPException(status_code=400, detail="Question required.")
@@ -892,6 +939,7 @@ def _start_ask_job(payload: Dict[str, Any]) -> str:
             formula_mode = bool(payload.get("formula_mode"))
             agents_enabled = bool(payload.get("agents_enabled"))
             web_enabled = bool(payload.get("web_enabled"))
+            strict_docs = bool(payload.get("strict_docs"))
             top_k = int(payload.get("top_k") or 10)
             only_doc = (payload.get("only_doc") or "").strip() or None
 
@@ -906,13 +954,13 @@ def _start_ask_job(payload: Dict[str, Any]) -> str:
                 formula_mode=formula_mode,
                 agents_enabled=agents_enabled,
                 web_enabled=web_enabled,
+                strict_docs=strict_docs,
                 progress=log,
                 only_doc=only_doc,
             )
 
             formatted_md = _format_answer(question, result, agents_enabled)
             answer_html = _md_to_html(formatted_md)
-            # Persist conversational memory (best-effort)
             try:
                 if question and isinstance(result, dict):
                     raw_answer = (result.get("answer") or "").strip()
@@ -928,7 +976,6 @@ def _start_ask_job(payload: Dict[str, Any]) -> str:
                     job["answer"] = answer_html
                     job["answer_markdown"] = formatted_md
                     job["status"] = "done"
-                    # Ensure at least one line to indicate completion
                     job.setdefault("logs", []).append("Done.")
         except PipelineCancelled:
             with ASK_LOCK:
@@ -936,7 +983,7 @@ def _start_ask_job(payload: Dict[str, Any]) -> str:
                 if job is not None:
                     job["status"] = "cancelled"
                     job["error"] = "Cancelled"
-        except HTTPException as exc:  # re-signal validation errors
+        except HTTPException as exc:
             with ASK_LOCK:
                 job = ASK_JOBS.get(job_id)
                 if job is not None:
@@ -952,23 +999,18 @@ def _start_ask_job(payload: Dict[str, Any]) -> str:
     threading.Thread(target=worker, daemon=True).start()
     return job_id
 
-
-# ---------------------------------------------------------------------------
-# Auth helpers
-
 async def get_current_user(request: Request):
     """Check if user is authenticated via cookie."""
     try:
         token = request.cookies.get("access_token")
         if not token:
             return None
-        # Verify token with the API server
         import httpx
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                "http://localhost:8000/api/auth/check",
+                f"{API_INTERNAL_BASE}/api/auth/check",
                 cookies={"access_token": token},
-                timeout=5.0
+                timeout=5.0,
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -978,10 +1020,6 @@ async def get_current_user(request: Request):
     except Exception as e:
         print(f"Auth check error: {e}")
         return None
-
-
-# ---------------------------------------------------------------------------
-# Routes
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -1015,20 +1053,24 @@ async def index(request: Request) -> HTMLResponse:
     )
 
 
-# Note: Settings endpoints are now served by the API server
+@app.get("/healthz")
+async def healthz() -> JSONResponse:
+    return JSONResponse({"status": "ok"})
 
+SKIP_LOG_PREFIXES = ["/static", "/assets", "/healthz"]
 
-# Note: Ingestion endpoints are now served by the API server
-
-
-# Note: Ask endpoints are now served by the API server
-
-
-# Note: Library endpoints are now served by the API server
-
-
-# Note: Ask job endpoints are now served by the API server
-
+@app.middleware("http")
+async def _log_requests(request: Request, call_next):
+    path = request.url.path
+    t0 = time.perf_counter()
+    resp = await call_next(request)
+    if not any(path.startswith(p) for p in SKIP_LOG_PREFIXES):
+        dt_ms = int((time.perf_counter() - t0) * 1000)
+        try:
+            logging.getLogger("uvicorn.access").info("%s %s %d %dms", request.method, path, resp.status_code, dt_ms)
+        except Exception:
+            pass
+    return resp
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn

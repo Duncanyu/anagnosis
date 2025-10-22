@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login - Anagnosis</title>
+    <link rel="icon" type="image/png" href="/assets/icon.png" />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -136,8 +137,11 @@
         const errorMsg = document.getElementById('error-message');
         const submitBtn = document.getElementById('submit-btn');
         
-        const API_HOST = window.location.hostname || 'localhost';
-        const AUTH_BASE = `http://${API_HOST}:8000/api/auth`;
+        const API_HOST = (window.location && window.location.hostname) ? window.location.hostname : 'localhost';
+        const API_BASE = (window.location && (window.location.port === '7860' || window.location.hostname === 'localhost'))
+          ? `http://${API_HOST}:8000/api`
+          : `${window.location.origin}/api`;
+        const AUTH_BASE = `${API_BASE}/auth`;
 
         form.addEventListener('submit', async (e) => {
             e.preventDefault();

@@ -14,10 +14,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.api
-    environment:
-      DATABASE_URL: postgresql+psycopg2://anag:anag@postgres:5432/anagnosis
-      SECRET_KEY: change-me-in-prod
-      DEV_EMAILS: duncan.w.yu@gmail.com
+    env_file:
+      - .env
     volumes:
       - ./artifacts:/app/artifacts
     depends_on:
@@ -27,9 +25,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.web
-    environment:
-      # Web may not need DB; included for completeness
-      DATABASE_URL: postgresql+psycopg2://anag:anag@postgres:5432/anagnosis
+    env_file:
+      - .env
     volumes:
       - ./artifacts:/app/artifacts
     depends_on:
@@ -47,4 +44,3 @@ services:
 
 volumes:
   pgdata:
-

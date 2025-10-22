@@ -24,7 +24,29 @@ def _setting(name: str, default: str = "") -> str:
     return default
 
 
-PROVIDER = (_setting("WEB_SEARCH_PROVIDER", "duckduckgo")).lower()
+def get_provider_name() -> str:
+    """Determine provider based on config and available keys.
+
+    - If WEB_SEARCH_PROVIDER is set to 'brave'|'serpapi'|'duckduckgo'|'auto', honor it.
+    - If 'auto' or empty: prefer a provider with a configured key (serpapi or brave).
+      If both keys exist, default to 'brave' unless explicitly set elsewhere.
+    - Fallback to 'duckduckgo'.
+    """
+    prov = (_setting("WEB_SEARCH_PROVIDER", "")).lower().strip()
+    brave_key = _setting("BRAVE_API_KEY") or _setting("BRAVE_SEARCH_KEY")
+    serp_key = _setting("SERPAPI_KEY")
+    if prov in {"brave", "serpapi", "duckduckgo"}:
+        return prov
+    # auto / unset
+    if prov == "auto" or prov == "":
+        if serp_key and not brave_key:
+            return "serpapi"
+        if brave_key and not serp_key:
+            return "brave"
+        if brave_key and serp_key:
+            # default preference when both available (changeable via settings)
+            return "brave"
+    return "duckduckgo"
 
 
 def _read_json(url: str, params: Dict[str, str], timeout: int) -> Dict:
@@ -110,7 +132,9 @@ def _brave_search(query: str, max_results: int, timeout: int) -> List[Dict[str, 
         return []
     headers = {
         "User-Agent": USER_AGENT,
-        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        # Brave Search API expects X-Subscription-Token per docs
+        "X-Subscription-Token": api_key,
     }
     params = {
         "q": query,
@@ -139,7 +163,7 @@ def search_web(query: str, max_results: int = 5, timeout: int = DEFAULT_TIMEOUT)
     if not query:
         return []
 
-    provider = PROVIDER
+    provider = get_provider_name()
     if provider == "brave":
         results = _brave_search(query, max_results, timeout)
         if results:

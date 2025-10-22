@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pathlib
 from typing import Any, Dict, List, Sequence
+import json
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -54,12 +56,61 @@ def _collect_user_docs(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def _extract_doc_names(summary_text: str) -> List[str]:
+    names: List[str] = []
+    if not summary_text:
+        return names
+    try:
+        for m in re.finditer(r"^##\s+(.+)$", summary_text, re.MULTILINE):
+            nm = (m.group(1) or "").strip()
+            if nm:
+                names.append(_normalize_doc_name(nm))
+    except Exception:
+        pass
+    return names
+
+
+def _doc_ingest_times() -> Dict[str, int]:
+    """Return latest known ingest timestamp per doc from summaries log."""
+    times: Dict[str, int] = {}
+    path = pathlib.Path("artifacts") / "doc_summaries.jsonl"
+    if not path.exists():
+        return times
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = (line or "").strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = int(rec.get("ts") or 0)
+                summary = rec.get("summary") or ""
+                for raw in _extract_doc_names(summary):
+                    name = _normalize_doc_name(raw)
+                    prev = int(times.get(name) or 0)
+                    if ts > prev:
+                        times[name] = ts
+    except Exception:
+        return times
+    return times
+
+
 @router.get("/library")
 async def api_library(user: User = Depends(require_auth)) -> JSONResponse:
     # Show documents across all embedding namespaces so users always see their
     # ingested files regardless of current backend selection
     rows = index_service.list_chunks_all_namespaces(user_id=str(user.id))
     documents = _collect_user_docs(rows)
+    # Attach latest known ingest timestamps for sorting by "Date added"
+    times = _doc_ingest_times()
+    for d in documents:
+        try:
+            d["ingested_at"] = int(times.get(d.get("name") or "") or 0) or None
+        except Exception:
+            d["ingested_at"] = None
     return JSONResponse({"documents": documents})
 
 
@@ -130,6 +181,8 @@ async def api_page_image(doc: str, page: int, needle: str | None = None, user: U
         pdf_path = pathlib.Path("artifacts") / "docs" / str(user.id) / safe
         if not pdf_path.exists():
             raise HTTPException(status_code=404, detail="Source PDF not available.")
+        if pdf_path.suffix.lower() != '.pdf':
+            raise HTTPException(status_code=415, detail="Preview available for PDFs only.")
         pnum = max(1, int(page))
         with fitz.open(pdf_path) as d:
             if pnum < 1 or pnum > len(d):
@@ -137,45 +190,7 @@ async def api_page_image(doc: str, page: int, needle: str | None = None, user: U
             pg = d.load_page(pnum - 1)
             pix = pg.get_pixmap(dpi=180, alpha=False)
             img_bytes = pix.tobytes("png")
-            # Optional highlight overlay using needle
-            if needle:
-                try:
-                    import io
-                    from PIL import Image, ImageDraw
-                    rects = []
-                    # Try multiple windows of the needle to improve match reliability
-                    text = (needle or "").strip()
-                    windows = [text]
-                    if len(text) > 60:
-                        step = max(10, len(text)//4)
-                        for i in range(0, len(text)-30, step):
-                            windows.append(text[i:i+30])
-                    quads = None
-                    for w in windows:
-                        w = " ".join(w.split())
-                        try:
-                            qs = pg.search_for(w, hit_max=32, flags=fitz.TEXT_IGNORECASE)
-                        except Exception:
-                            qs = pg.search_for(w)
-                        if qs:
-                            quads = qs; break
-                    for r in quads or []:
-                        # r is Rect; scale to current DPI
-                        rects.append(r)
-                    if rects:
-                        img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
-                        draw = ImageDraw.Draw(img, 'RGBA')
-                        # Fit rect coordinates: PyMuPDF coordinates are in points at base matrix. We used dpi=180 pixmap -> scale factor = dpi/72
-                        scale = 180/72.0
-                        for r in rects:
-                            x0,y0,x1,y1 = r.x0*scale, r.y0*scale, r.x1*scale, r.y1*scale
-                            pad = 2
-                            draw.rectangle([x0-pad,y0-pad,x1+pad,y1+pad], outline=(88,101,242,255), width=3, fill=(88,101,242,64))
-                        out = io.BytesIO()
-                        img.save(out, format='PNG')
-                        img_bytes = out.getvalue()
-                except Exception:
-                    pass
+            # Highlights disabled: always return raw rendered page
         return Response(content=img_bytes, media_type="image/png")
     except HTTPException:
         raise

@@ -4,10 +4,10 @@ os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
 def _resolve_webengine_process() -> str | None:
     try:
-        import PySide6  # noqa: F401
+        import PySide6
     except Exception:
         return None
-    base = pathlib.Path(PySide6.__file__).resolve().parent  # type: ignore[name-defined]
+    base = pathlib.Path(PySide6.__file__).resolve().parent
     candidates = [
         base / "Qt" / "libexec" / "QtWebEngineProcess",
         base / "Qt" / "libexec" / "QtWebEngineProcess.app" / "Contents" / "MacOS" / "QtWebEngineProcess",
@@ -907,7 +907,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.answer_stack.setCurrentWidget(self.answer_web)
                 return
             except Exception:
-                # Fall back to plain renderer if WebEngine misbehaves mid-demo
                 self.use_webengine = False
                 os.environ["UI_USE_WEBENGINE"] = "false"
                 self._init_answer_renderer()

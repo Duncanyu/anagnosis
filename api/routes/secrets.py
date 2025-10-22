@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from api.core.config import save_secret, present_keys, WANTED_KEYS
 
-router = APIRouter(prefix="/secrets", tags=["secrets"])
+router = APIRouter(prefix="/api/secrets", tags=["secrets"])
 
 class SecretIn(BaseModel):
     name: str = Field(..., description="e.g. OPENAI_API_KEY")

@@ -65,3 +65,50 @@ def clear(*, user_id: str = None):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         pass
+
+def prune_by_doc_names(doc_names, *, user_id: str = None) -> int:
+    """Remove memory turns that reference any of the given doc names in citations.
+
+    A simple heuristic: drop lines whose question or answer contains
+    "[<DocName> p." (case-insensitive, base filename match only).
+    Returns number of removed turns.
+    """
+    names = {str(n).strip().lower() for n in (doc_names or []) if str(n).strip()}
+    if not names:
+        return 0
+    path = _mem_path(user_id)
+    if not path.exists():
+        return 0
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            lines = [ln for ln in f.read().splitlines() if ln.strip()]
+    except Exception:
+        return 0
+    keep, removed = [], 0
+    for ln in lines:
+        try:
+            obj = json.loads(ln)
+        except Exception:
+            keep.append(ln)
+            continue
+        txt = ((obj.get("q") or "") + "\n" + (obj.get("a") or "")).lower()
+        hit = False
+        for n in names:
+            base = n
+            # Compare against base filename only
+            if "/" in base or "\\" in base:
+                import pathlib as _p
+                base = _p.Path(base).name
+            if base and f"[{base} p" in txt:
+                hit = True
+                break
+        if hit:
+            removed += 1
+        else:
+            keep.append(ln)
+    try:
+        with path.open("w", encoding="utf-8") as f:
+            f.write("\n".join(keep) + ("\n" if keep else ""))
+    except Exception:
+        pass
+    return removed

@@ -118,6 +118,23 @@ def _ocr_page(doc, i, dpi=400):
     img2 = _prep_image(img, scale=2.2)
     return _ocr_span(img2)
 
+def ocr_image_bytes(image_bytes: bytes) -> str:
+    """Run Tesseract OCR on an image (bytes). Returns extracted text (best effort).
+
+    Applies light preprocessing similar to PDF page OCR: grayscale, autocontrast,
+    sharpening, and upscaling to improve OCR quality.
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        prepped = _prep_image(img, scale=2.0)
+        return _ocr_span(prepped)
+    except Exception:
+        try:
+            # Last-ditch: try raw image
+            return _nfkc(pytesseract.image_to_string(Image.open(io.BytesIO(image_bytes)), config="--psm 6 -l eng")).strip()
+        except Exception:
+            return ""
+
 _FONT_MAPS = None
 
 def _load_font_maps():
@@ -324,11 +341,161 @@ def parse_pdf_bytes(pdf_bytes, progress_cb=None):
     }
 
 def parse_any_bytes(filename, data, progress_cb=None):
+    """Parse many common document types into a unified page list.
+
+    Supported:
+      - .pdf (structured extraction with fallbacks)
+      - Images: png/jpg/jpeg/tif/tiff/bmp/webp — OCR
+      - Plain text / Markdown: .txt, .md
+      - HTML: .html, .htm (stripped to visible text)
+      - CSV/TSV: .csv, .tsv (rows joined)
+      - Word: .docx (extract text from document.xml)
+      - RTF: .rtf (simple control word stripping)
+    """
     ext = pathlib.Path(filename).suffix.lower()
     if ext == ".pdf":
         return parse_pdf_bytes(data, progress_cb=progress_cb)
     if ext in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}:
-        img = Image.open(io.BytesIO(data))
-        t = pytesseract.image_to_string(_prep_image(img), config="--psm 6 -l eng")
-        return {"num_pages": 1, "ocr_pages": 1, "ocr_page_numbers": [1], "suspect_pages": [], "salvaged_pages": [], "glyphmap_pages": [], "alt_extractor_pages": [], "pages": [{"page": 1, "text": _nfkc(t).strip(), "suspect": False}]}
+        try:
+            img = Image.open(io.BytesIO(data))
+            t = pytesseract.image_to_string(_prep_image(img), config="--psm 6 -l eng")
+            text = _nfkc(t).strip()
+        except Exception:
+            text = ""
+        return {"num_pages": 1, "ocr_pages": 1, "ocr_page_numbers": [1], "suspect_pages": [], "salvaged_pages": [], "glyphmap_pages": [], "alt_extractor_pages": [], "pages": [{"page": 1, "text": text, "suspect": False}]}
+    if ext in {".txt", ".md", ".markdown"}:
+        try:
+            text = data.decode("utf-8", errors="ignore")
+        except Exception:
+            text = str(data)
+        return {"num_pages": 1, "ocr_pages": 0, "ocr_page_numbers": [], "suspect_pages": [], "salvaged_pages": [], "glyphmap_pages": [], "alt_extractor_pages": [], "pages": [{"page": 1, "text": _nfkc(text).strip(), "suspect": False}]}
+    if ext in {".html", ".htm"}:
+        try:
+            from bs4 import BeautifulSoup
+            html = data.decode("utf-8", errors="ignore")
+            soup = BeautifulSoup(html, "html.parser")
+            # Remove script/style
+            for tag in soup(["script", "style", "noscript"]):
+                tag.extract()
+            text = _nfkc(soup.get_text("\n")).strip()
+        except Exception:
+            text = ""
+        return {"num_pages": 1, "ocr_pages": 0, "ocr_page_numbers": [], "suspect_pages": [], "salvaged_pages": [], "glyphmap_pages": [], "alt_extractor_pages": [], "pages": [{"page": 1, "text": text, "suspect": False}]}
+    if ext in {".csv", ".tsv"}:
+        try:
+            text = data.decode("utf-8", errors="ignore")
+        except Exception:
+            text = str(data)
+        return {"num_pages": 1, "ocr_pages": 0, "ocr_page_numbers": [], "suspect_pages": [], "salvaged_pages": [], "glyphmap_pages": [], "alt_extractor_pages": [], "pages": [{"page": 1, "text": _nfkc(text).strip(), "suspect": False}]}
+    if ext == ".docx":
+        # Minimal dependency approach: unzip and read document.xml, strip tags
+        try:
+            import zipfile, re as _re
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                tx = []
+                for name in [
+                    "word/document.xml",
+                    "word/header1.xml","word/header2.xml","word/header3.xml",
+                    "word/footer1.xml","word/footer2.xml","word/footer3.xml",
+                ]:
+                    try:
+                        xml = zf.read(name).decode("utf-8", errors="ignore")
+                        # Replace w:p with newlines and strip other tags
+                        xml = xml.replace("</w:p>", "\n")
+                        plain = _re.sub(r"<[^>]+>", "", xml)
+                        tx.append(plain)
+                    except Exception:
+                        pass
+                text = _nfkc("\n".join(tx)).strip()
+        except Exception:
+            text = ""
+        return {"num_pages": 1, "ocr_pages": 0, "ocr_page_numbers": [], "suspect_pages": [], "salvaged_pages": [], "glyphmap_pages": [], "alt_extractor_pages": [], "pages": [{"page": 1, "text": text, "suspect": False}]}
+    if ext == ".rtf":
+        try:
+            import re as _re
+            raw = data.decode("utf-8", errors="ignore")
+            # Naive RTF stripper: remove control words and groups
+            s = _re.sub(r"\\[a-zA-Z]+-?\d* ?", "", raw)  # control words
+            s = _re.sub(r"[{}]", "", s)
+            text = _nfkc(s).strip()
+        except Exception:
+            text = ""
+        return {"num_pages": 1, "ocr_pages": 0, "ocr_page_numbers": [], "suspect_pages": [], "salvaged_pages": [], "glyphmap_pages": [], "alt_extractor_pages": [], "pages": [{"page": 1, "text": text, "suspect": False}]}
+    if ext == ".pptx":
+        # Read slide XML and notes from PPTX
+        try:
+            import zipfile, re as _re
+            tx = []
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                for name in list(zf.namelist()):
+                    if name.startswith("ppt/slides/slide") and name.endswith(".xml"):
+                        try:
+                            xml = zf.read(name).decode("utf-8", errors="ignore")
+                            xml = xml.replace("</a:p>", "\n")
+                            plain = _re.sub(r"<[^>]+>", "", xml)
+                            tx.append(plain)
+                        except Exception:
+                            pass
+                    if name.startswith("ppt/notesSlides/notesSlide") and name.endswith(".xml"):
+                        try:
+                            xml = zf.read(name).decode("utf-8", errors="ignore")
+                            xml = xml.replace("</a:p>", "\n")
+                            plain = _re.sub(r"<[^>]+>", "", xml)
+                            tx.append(plain)
+                        except Exception:
+                            pass
+            text = _nfkc("\n".join(tx)).strip()
+        except Exception:
+            text = ""
+        return {"num_pages": 1, "ocr_pages": 0, "ocr_page_numbers": [], "suspect_pages": [], "salvaged_pages": [], "glyphmap_pages": [], "alt_extractor_pages": [], "pages": [{"page": 1, "text": text, "suspect": False}]}
+    if ext == ".epub":
+        # Parse all XHTML/HTML docs inside EPUB container
+        try:
+            import zipfile
+            from bs4 import BeautifulSoup
+            tx = []
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                for name in zf.namelist():
+                    if name.lower().endswith(('.xhtml', '.html', '.htm')):
+                        try:
+                            html = zf.read(name).decode('utf-8', errors='ignore')
+                            soup = BeautifulSoup(html, 'html.parser')
+                            for tag in soup(["script","style","noscript"]):
+                                tag.extract()
+                            tx.append(soup.get_text("\n"))
+                        except Exception:
+                            pass
+            text = _nfkc("\n".join(tx)).strip()
+        except Exception:
+            text = ""
+        return {"num_pages": 1, "ocr_pages": 0, "ocr_page_numbers": [], "suspect_pages": [], "salvaged_pages": [], "glyphmap_pages": [], "alt_extractor_pages": [], "pages": [{"page": 1, "text": text, "suspect": False}]}
+    if ext == ".odt":
+        # OpenDocument Text: content.xml
+        try:
+            import zipfile, re as _re
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                xml = zf.read("content.xml").decode("utf-8", errors="ignore")
+                xml = xml.replace("</text:p>", "\n")
+                text = _re.sub(r"<[^>]+>", "", xml)
+            text = _nfkc(text).strip()
+        except Exception:
+            text = ""
+        return {"num_pages": 1, "ocr_pages": 0, "ocr_page_numbers": [], "suspect_pages": [], "salvaged_pages": [], "glyphmap_pages": [], "alt_extractor_pages": [], "pages": [{"page": 1, "text": text, "suspect": False}]}
+    if ext in {".json", ".yml", ".yaml"}:
+        try:
+            text = data.decode("utf-8", errors="ignore")
+        except Exception:
+            text = str(data)
+        return {"num_pages": 1, "ocr_pages": 0, "ocr_page_numbers": [], "suspect_pages": [], "salvaged_pages": [], "glyphmap_pages": [], "alt_extractor_pages": [], "pages": [{"page": 1, "text": _nfkc(text).strip(), "suspect": False}]}
+    if ext == ".xlsx":
+        # Simple sharedStrings extraction (best-effort)
+        try:
+            import zipfile, re as _re
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                xml = zf.read("xl/sharedStrings.xml").decode("utf-8", errors="ignore")
+                xml = xml.replace("</t>", "\n")
+                text = _re.sub(r"<[^>]+>", "", xml)
+        except Exception:
+            text = ""
+        return {"num_pages": 1, "ocr_pages": 0, "ocr_page_numbers": [], "suspect_pages": [], "salvaged_pages": [], "glyphmap_pages": [], "alt_extractor_pages": [], "pages": [{"page": 1, "text": _nfkc(text).strip(), "suspect": False}]}
     raise ValueError("Unsupported file type: " + ext)

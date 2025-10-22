@@ -66,3 +66,18 @@ Built on top of a custom **retrieval-augmented generation (RAG)** pipeline, it i
 University students and researchers often face the same problem: too much material, too little time. Traditional search is keyword-based and fails on PDFs filled with equations, tables, and diagrams. Anagnosis shows how modern **AI, embeddings, and retrieval techniques** can be used to bridge that gap — surfacing formulas, definitions, and explanations directly when needed.  
 
 This project is both a **practical tool-in-progress** for academic life and a **demonstration of technical skills** in advanced AI system design.  
+
+---
+
+## Quickstart (Local, no Docker)
+
+- Install dependencies: `python3 -m pip install -r requirements.txt`
+- Start API (SQLite by default): `bash scripts/run_local_api.sh`
+  - Health check: `curl http://127.0.0.1:8000/healthz`
+- Start Web UI (separate terminal): `bash scripts/run_local_web.sh`
+  - Open `http://127.0.0.1:7860`
+
+Notes
+- These scripts avoid Docker Compose and default to SQLite (`./anagnosis.db`).
+- To use Postgres locally instead, run the API with `USE_SQLITE=0` and set `DATABASE_URL` (e.g., `postgresql+psycopg2://user:pass@localhost:5432/db`).
+- The `.env` file is intended for Docker Compose. It is not automatically loaded for local runs.

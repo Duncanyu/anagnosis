@@ -274,25 +274,174 @@ def _load_doc_topics(limit_docs: int = 20) -> List[set]:
 
 
 def estimate_relevance(question: str) -> Tuple[Optional[float], Dict[str, Any]]:
-    q_tokens = set(_tokenize_simple(question))
+    """Estimate coarse relevance of the question to local documents.
+
+    Previous approach used doc summaries or file names, which produced false
+    positives for generic words (e.g., "plan", "app"). This implementation
+    scans a small sample of actual chunk texts and computes lexical overlap.
+    The score is best_overlap / |Q| after stopword filtering.
+    """
+    q_raw = (question or "").lower()
+    q_tokens = set(_tokenize_simple(q_raw))
+    # Strong stop-list to avoid generic drift
+    STOP = {
+        "what","which","when","where","why","how","does","do","is","are","was","were","can","could","should","would","will","might","may",
+        "the","and","for","from","this","that","these","those","into","about","your","our","their","its","of","to","in","on","at","by","it","we","you","i","a","an",
+        "plan","plans","planning","feature","features","application","applications","app","apps","project","projects","goal","goals","user","users","system","design",
+        "explain","please","show","list","give","tell","lets","let","build","create","make"
+    }
+    q_tokens = {t for t in q_tokens if t not in STOP}
     if not q_tokens:
         return None, {"tokens": 0, "matched": 0}
-    topics = _load_doc_topics()
-    if not topics:
-        return None, {"tokens": len(q_tokens), "matched": 0}
+    # Scan chunk texts (sampled) for best overlap
+    import pathlib, json
+    base = pathlib.Path("artifacts")
+    files = sorted(base.glob("chunks_*.jsonl"))
+    if not files:
+        # legacy
+        legacy = base / "chunks.jsonl"
+        if legacy.exists():
+            files = [legacy]
     best = 0.0
     best_match = 0
-    for toks in topics:
-        if not toks:
+    scanned = 0
+    cap = 2000  # hard cap on chunks scanned
+    for fp in files:
+        try:
+            with fp.open("r", encoding="utf-8") as f:
+                for line in f:
+                    if scanned >= cap:
+                        break
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    txt = (obj.get("text") or "").lower()
+                    if not txt:
+                        continue
+                    htoks = set(_tokenize_simple(txt))
+                    inter = len(q_tokens & htoks)
+                    if inter == 0:
+                        scanned += 1
+                        continue
+                    score = inter / max(1, len(q_tokens))
+                    if score > best:
+                        best = score
+                        best_match = inter
+                    scanned += 1
+                    if best >= 0.9:
+                        break
+        except Exception:
             continue
-        overlap = len(q_tokens & toks)
-        if overlap == 0:
-            continue
-        score = overlap / len(q_tokens)
-        if score > best:
-            best = score
-            best_match = overlap
-    return best, {"tokens": len(q_tokens), "matched": best_match}
+        if scanned >= cap:
+            break
+    return best, {"tokens": len(q_tokens), "matched": best_match, "scanned": scanned}
+
+
+def llm_relevance_gate(question: str, chunks: List[Dict[str, Any]], *, max_ctx_chars: int = 1600, doc_focus: Optional[str] = None) -> Tuple[float, Dict[str, Any]]:
+    """LLM-based relevance score in [0,1], with a heuristic fallback.
+
+    - Uses per-user OPENAI_API_KEY if present (applied upstream in routes).
+    - Returns (score, meta). `score` is a float 0..1; callers can compare
+      against `ASK_STRICT_LLM_MIN` (e.g., 0.6).
+    - Meta includes {'model': 'openai'|'heuristic', ...}.
+    """
+    try:
+        from api.core.config import load_config  # lazy import
+        cfg = load_config() or {}
+        key = cfg.get("OPENAI_API_KEY")
+    except Exception:
+        key = None
+    # Build compact context (allow configuration for size)
+    try:
+        max_ctx_chars = int(os.getenv("ASK_STRICT_LLM_CTX_CHARS", str(max_ctx_chars)))
+    except Exception:
+        max_ctx_chars = max_ctx_chars
+    try:
+        max_snippets = int(os.getenv("ASK_STRICT_LLM_MAX_SNIPPETS", "24"))
+    except Exception:
+        max_snippets = 24
+    ctx_lines: List[str] = []
+    used = 0
+    count = 0
+    for c in (chunks or []):
+        name = (c.get("doc_name") or "")
+        p = c.get("page_start") or c.get("page") or 1
+        text = re.sub(r"\s+", " ", (c.get("text") or "").strip())
+        line = f"[{name} p.{p}] {text}"
+        if used + len(line) > max_ctx_chars:
+            break
+        ctx_lines.append(line)
+        used += len(line)
+        count += 1
+        if count >= max_snippets:
+            break
+    ctx = "\n".join(ctx_lines)
+    if key:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=key)
+            sys = (
+                "You are a careful judge for RAG relevance. Given a user question"
+                " and a set of retrieved document snippets, decide how well the"
+                " snippets directly answer the question. Snippets are prefixed with"
+                " source tags like [FileName.pdf p.N]. If the question refers to a"
+                " specific document (mentions a title/file or says 'this document',"
+                " 'the reading', etc.), require that support come from that document;"
+                " otherwise penalize cross-document drift. If the question is general"
+                " knowledge and the snippets don’t obviously address it, score low."
+                " Use fractional scores to reflect partial support (avoid just 0/1);"
+                " prefer one decimal place like 0.1, 0.4, 0.7, 0.9. Respond ONLY with"
+                " a JSON object: {\"score\": <float 0..1>,\n"
+                "  \"label\": \"Relevant|Irrelevant\", \"reason\": <short>}.\n"
+                " The score must reflect direct support (0=no support, 1=fully covered)."
+            )
+            focus = (doc_focus or "").strip()
+            focus_note = ("Only consider support from the document named: '" + focus + "'. Ignore other sources.\n\n") if focus else ""
+            prompt = (
+                ("Question:\n" + question + "\n\n") +
+                focus_note +
+                ("Snippets (with sources):\n" + ctx + "\n\n")
+            )
+            msg = client.chat.completions.create(
+                model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
+                messages=[{"role": "system", "content": sys}, {"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=120,
+            )
+            raw = (msg.choices[0].message.content or "").strip()
+            import json as _json, re as _re
+            score = 0.0
+            label = "Irrelevant"
+            reason = ""
+            try:
+                obj = _json.loads(raw)
+                score = float(obj.get("score", 0.0))
+                label = str(obj.get("label", "Irrelevant"))
+                reason = str(obj.get("reason", ""))
+            except Exception:
+                m = _re.search(r"([01](?:\.\d+)?)", raw)
+                if m:
+                    score = float(m.group(1))
+                if "relev" in raw.lower():
+                    label = "Relevant"
+            score = max(0.0, min(1.0, score))
+            meta = {"model": "openai", "raw": raw, "label": label, "reason": reason, "ctx_snippets": len(ctx_lines), "ctx_chars": len(ctx)}
+            if doc_focus:
+                meta["doc_focus"] = doc_focus
+            return score, meta
+        except Exception as exc:
+            pass
+    # Heuristic fallback — continuous score
+    scores = retrieval_judge_scores(
+        [{"text": c.get("text", ""), "doc": c.get("doc_name"), "page": c.get("page_start") or c.get("page") or 1} for c in (chunks or [])[:8]],
+        question,
+    )
+    best = scores[0][0] if scores else 0.0
+    meta: Dict[str, Any] = {"model": "heuristic", "score": best, "ctx_snippets": len(ctx_lines), "ctx_chars": len(ctx)}
+    if doc_focus:
+        meta["doc_focus"] = doc_focus
+    return best, meta
 
 
 def _is_exercise_like(s: str) -> bool:

@@ -6,6 +6,12 @@ const ingestLog = document.getElementById('ingest-log');
 const askForm = document.getElementById('ask-form');
 const askLog = document.getElementById('ask-log');
 const askProgress = document.getElementById('ask-progress');
+const askStatus = document.getElementById('ask-status');
+const imageInput = document.getElementById('image-input');
+const attachBtn = document.getElementById('attach-image');
+const attachList = document.getElementById('chat-attachments');
+const pageViewer = document.getElementById('page-viewer');
+const pageViewerImg = document.getElementById('page-viewer-img');
 const summaryContent = document.getElementById('summary-content');
 const snapshotContent = document.getElementById('snapshot-content');
 const chatWindow = document.getElementById('chat-window');
@@ -18,6 +24,9 @@ let hasSentinelSignal = false;
 // Temporary spacer to pin last user message near the top without permanent space
 let tempBottomSpacer = null;
 let pinnedTopMessage = null;
+// Holds HTML preview of the user's current message (e.g., image thumbs) until saved
+let pendingUserHtml = null;
+let chatAttachments = [];
 
 function ensureBottomSentinel() {
   if (!chatWindow) return null;
@@ -40,13 +49,19 @@ const controlsDetails = document.querySelector('.chat-controls');
 let controlsIsCompact = false;
 const libraryGrid = document.getElementById('library-grid');
 const libraryEmpty = document.getElementById('library-empty');
+const librarySearchInput = document.getElementById('library-search');
+const librarySortSelect = document.getElementById('library-sort');
 const refreshLibraryBtn = document.getElementById('refresh-library'); // may not exist
 const onlyDocSelect = document.getElementById('only-doc');
+const webToggle = document.getElementById('web-enabled');
+const strictToggle = document.getElementById('strict-docs');
 const saveLibraryBtn = document.getElementById('save-library');
 const clearLibraryBtn = document.getElementById('clear-library');
 const cancelLibraryBtn = document.getElementById('cancel-library');
 const settingsForm = document.getElementById('settings-form');
 const settingsStatus = document.getElementById('settings-status');
+let settingsSaveTimer = null;
+let settingsSaveController = null;
 const uploadProgressTrack = document.getElementById('upload-progress-track');
 const uploadProgressBar = document.getElementById('upload-progress');
 const uploadProgressWrap = uploadProgressTrack ? uploadProgressTrack.parentElement : null;
@@ -54,6 +69,87 @@ const bootstrapEl = document.getElementById('bootstrap-settings');
 const uploadListEl = document.getElementById('upload-list');
 let selectedFiles = [];
 const dropZone = document.querySelector('.ingest-dropzone');
+const docModal = document.getElementById('doc-details-modal');
+
+function showDocModal(html) {
+  try {
+    if (!docModal) return;
+    const inner = docModal.querySelector('.doc-inner');
+    if (inner) inner.innerHTML = html;
+    docModal.style.display = 'flex';
+    docModal.setAttribute('aria-hidden', 'false');
+  } catch {}
+}
+
+function hideDocModal() {
+  try {
+    if (!docModal) return;
+    docModal.style.display = 'none';
+    docModal.setAttribute('aria-hidden', 'true');
+  } catch {}
+}
+
+docModal?.addEventListener('click', (e) => {
+  const target = e.target;
+  if (!(target instanceof HTMLElement)) return;
+  if (target.classList.contains('doc-backdrop') || target.classList.contains('doc-close')) {
+    hideDocModal();
+  }
+});
+
+async function openDocDetails(name) {
+  try {
+    const resp = await fetch(`${API_BASE}/library/doc/${encodeURIComponent(name)}`, { credentials: 'include' });
+    if (!resp.ok) {
+      const t = await resp.text(); showError(t || 'Failed to load document'); return;
+    }
+    const d = await resp.json();
+    const esc = escapeHTML;
+    const headings = (Array.isArray(d.top_headings) && d.top_headings.length)
+      ? '<ul>' + d.top_headings.map(h => `<li>${esc(h.heading)} <small>(${h.count})</small></li>`).join('') + '</ul>'
+      : '<em>No headings found.</em>';
+    const samples = (Array.isArray(d.samples) && d.samples.length)
+      ? '<ul>' + d.samples.map(s => `<li>[p.${esc(String(s.page || '?'))}] ${esc(String(s.snippet || '')).slice(0, 300)}</li>`).join('') + '</ul>'
+      : '<em>No samples available.</em>';
+    const pages = Array.isArray(d.pages) ? d.pages.join(', ') : '';
+    const html = `
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+        <h3 style="margin:0;">${esc(d.display_name || d.name)}</h3>
+        <button type="button" class="doc-close" aria-label="Close" style="border:1px solid var(--accent-border); background:var(--accent-bg-mid); color:var(--accent-text); border-radius:10px; padding:6px 10px; font-weight:600;">Close</button>
+      </div>
+      <div style="margin-top:8px; color:#334155;">
+        <div style="display:flex; gap:14px; flex-wrap:wrap;">
+          <span><strong>Pages:</strong> ${esc(String(d.page_count || 0))}</span>
+          <span><strong>Chunks:</strong> ${esc(String(d.chunk_count || 0))}</span>
+          <span><strong>Math chunks:</strong> ${esc(String(d.math_chunks || 0))}</span>
+          <span><strong>Equations:</strong> ${esc(String(d.equations || 0))}</span>
+          <span><strong>Formula chunks:</strong> ${esc(String(d.formula_chunks || 0))}</span>
+        </div>
+        ${pages ? `<div style="margin-top:6px"><strong>Pages list:</strong> ${esc(String(pages))}</div>` : ''}
+        <div style="margin-top:10px"><strong>Top headings</strong>${headings}</div>
+        <div style="margin-top:10px"><strong>Samples</strong>${samples}</div>
+        <div style="margin-top:14px; display:flex; gap:8px;">
+          <button type="button" class="primary" id="ask-only-doc">Ask only this doc</button>
+          <button type="button" class="secondary doc-close">Close</button>
+        </div>
+      </div>`;
+    showDocModal(html);
+    const askBtn = docModal.querySelector('#ask-only-doc');
+    askBtn?.addEventListener('click', () => {
+      try {
+        if (onlyDocSelect) {
+          onlyDocSelect.value = d.name || name;
+        }
+        switchTab('ask');
+        hideDocModal();
+        const q = document.getElementById('question');
+        if (q) q.focus();
+      } catch {}
+    });
+  } catch (err) {
+    showError(err);
+  }
+}
 
 const API_HOST = (window.location && window.location.hostname) ? window.location.hostname : 'localhost';
 // Use same-origin /api when not running local dev server on 7860
@@ -153,6 +249,10 @@ const ingestPolls = new Map();
 let defaultsData = {};
 const pendingRemovals = new Set();
 let librarySaveController = null;
+let __libraryData = [];
+let __librarySearch = '';
+let __librarySort = 'date';
+let __libraryDir = 'desc'; // 'asc' or 'desc'
 
 // Friendly starter titles shown only when a chat is empty (not persisted)
 // Keep these as greetings/intent prompts rather than concrete examples.
@@ -459,11 +559,91 @@ function applyDefaults(defaults) {
   setValue('ask-time-budget', defaults.ASK_TIME_BUDGET_SEC);
   setChecked('settings-exhaustive', defaults.ASK_EXHAUSTIVE);
   const rerankerSettings = document.getElementById('settings-reranker');
-  if (rerankerSettings) rerankerSettings.value = defaults.ASK_RERANKER || 'off';
+  if (rerankerSettings) rerankerSettings.value = (defaults.ASK_RERANKER && defaults.ASK_RERANKER !== 'off') ? defaults.ASK_RERANKER : 'minilm';
   setValue('ask-candidates', defaults.ASK_CANDIDATES);
+  setValue('web-provider', defaults.WEB_SEARCH_PROVIDER || 'auto');
+  const rerOn = document.getElementById('reranker-on');
+  // Default OFF regardless of server defaults
+  if (rerOn) rerOn.checked = false;
+  // web scraping controls removed
 }
 
 applyDefaults(defaultsData);
+
+// Ensure Web search and Strict docs are mutually exclusive in the UI
+if (webToggle) {
+  webToggle.addEventListener('change', () => {
+    try {
+      if (webToggle.checked && strictToggle) {
+        strictToggle.checked = false;
+      }
+    } catch {}
+  });
+}
+if (strictToggle) {
+  strictToggle.addEventListener('change', () => {
+    try {
+      if (strictToggle.checked && webToggle) {
+        webToggle.checked = false;
+      }
+    } catch {}
+  });
+}
+
+// Exhaustive popover: show settings only on demand when toggled on
+const exPopover = document.getElementById('ex-popover');
+const exCheckbox = document.getElementById('exhaustive');
+function positionExPopover() {
+  try {
+    if (!exPopover || !exCheckbox || !exCheckbox.checked) return;
+    const r = exCheckbox.getBoundingClientRect();
+    const panel = exPopover.querySelector('.ex-panel');
+    const pad = 8;
+    const x = Math.max(8, Math.min((r.left + (r.width/2) - 160), window.innerWidth - 340));
+    const y = Math.max(8, r.top - (panel?.offsetHeight || 120) - 12);
+    exPopover.style.left = x + 'px';
+    exPopover.style.top = y + 'px';
+  } catch {}
+}
+function showExPopover(show) {
+  try {
+    if (!exPopover) return;
+    exPopover.style.display = show ? 'block' : 'none';
+    if (show) {
+      positionExPopover();
+      // Focus first field
+      const first = exPopover.querySelector('input');
+      try { first?.focus(); } catch {}
+      window.addEventListener('resize', positionExPopover);
+      window.addEventListener('scroll', positionExPopover, true);
+      document.addEventListener('click', handleExOutside, true);
+    } else {
+      window.removeEventListener('resize', positionExPopover);
+      window.removeEventListener('scroll', positionExPopover, true);
+      document.removeEventListener('click', handleExOutside, true);
+    }
+  } catch {}
+}
+function handleExOutside(e){
+  try {
+    if (!exPopover || exPopover.style.display === 'none') return;
+    const t = e.target;
+    if (!(t instanceof Node)) return;
+    if (!exPopover.contains(t) && !exCheckbox.contains(t)) {
+      showExPopover(false);
+    }
+  } catch {}
+}
+exCheckbox?.addEventListener('change', () => {
+  try {
+    if (exCheckbox.checked) {
+      showExPopover(true);
+    } else {
+      showExPopover(false);
+      if (askStatus) { askStatus.textContent = ''; askStatus.style.display = 'none'; }
+    }
+  } catch {}
+});
 
 function switchTab(target) {
   tabs.forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === target));
@@ -521,6 +701,131 @@ function setInputFiles(filesArray) {
   input.files = dt.files;
 }
 
+function renderChatAttachments() {
+  try {
+    if (!attachList) return;
+    if (!chatAttachments.length) {
+      attachList.innerHTML = '';
+      attachList.style.display = 'none';
+      return;
+    }
+    attachList.style.display = '';
+    attachList.innerHTML = chatAttachments.map((file, idx) => {
+      try { if (!file._url) file._url = URL.createObjectURL(file); } catch {}
+      const url = file._url || '';
+      return `
+      <li style="display:inline-flex; align-items:center; gap:6px; background:rgba(15,23,42,0.06); color:#0f172a; border-radius:16px; padding:4px 8px; margin:0 6px 6px 0;">
+        <img src="${url}" alt="" style="width:22px;height:22px;object-fit:cover;border-radius:6px; border:1px solid rgba(15,23,42,0.15);" />
+        <span style="font-size:.9em; max-width:220px; white-space:nowrap; text-overflow:ellipsis; overflow:hidden; display:inline-block;" title="${escapeHTML(file.name)}">${escapeHTML(file.name)}</span>
+        <button type="button" class="remove-attach" data-index="${idx}" title="Remove" aria-label="Remove" style="border:0; background:transparent; color:#0f172a; cursor:pointer;">×</button>
+      </li>`;
+    }).join('');
+  } catch {}
+}
+
+attachBtn?.addEventListener('click', () => imageInput?.click());
+// Fallback in case the button is re-rendered
+document.addEventListener('click', (e) => {
+  const t = e.target;
+  if (!(t instanceof HTMLElement)) return;
+  const btn = t.closest('#attach-image');
+  if (btn) {
+    e.preventDefault();
+    try { imageInput?.click(); } catch {}
+  }
+});
+imageInput?.addEventListener('change', (e) => {
+  try {
+    const files = Array.from(imageInput.files || []).filter(f => f && f.type && f.type.startsWith('image/'));
+    if (!files.length) return;
+    // Limit to 4 attachments to avoid huge payloads
+    const remain = Math.max(0, 4 - chatAttachments.length);
+    chatAttachments.push(...files.slice(0, remain));
+    renderChatAttachments();
+    // reset input to allow re-selecting the same file
+    imageInput.value = '';
+  } catch {}
+});
+
+attachList?.addEventListener('click', (e) => {
+  const t = e.target;
+  if (!(t instanceof HTMLElement)) return;
+  const rm = t.closest('button.remove-attach');
+  if (rm) {
+    const i = Number(rm.getAttribute('data-index') || '-1');
+    if (i >= 0 && i < chatAttachments.length) {
+      chatAttachments.splice(i, 1);
+      renderChatAttachments();
+    }
+  }
+});
+
+// Paste images into the question textarea
+document.getElementById('question')?.addEventListener('paste', (evt) => {
+  try {
+    const items = evt.clipboardData && evt.clipboardData.items ? Array.from(evt.clipboardData.items) : [];
+    const imgs = items.map(it => (it && it.type && it.type.startsWith('image/')) ? it.getAsFile() : null).filter(Boolean);
+    if (!imgs.length) return;
+    const remain = Math.max(0, 4 - chatAttachments.length);
+    chatAttachments.push(...imgs.slice(0, remain));
+    renderChatAttachments();
+  } catch {}
+});
+
+async function filesToDataURLs(files) {
+  const out = [];
+  for (const f of files) {
+    if (!f) continue;
+    const dataUrl = await new Promise((resolve, reject) => {
+      try {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = (e) => reject(e);
+        r.readAsDataURL(f);
+      } catch (e) { resolve(null); }
+    });
+    if (dataUrl && typeof dataUrl === 'string') {
+      out.push({ name: f.name || 'image', type: f.type || 'image/png', data: dataUrl });
+    }
+  }
+  return out;
+}
+
+// Create a small JPEG thumbnail DataURL from a larger DataURL to keep storage light
+async function toThumbDataURL(dataUrl, maxW = 96, quality = 0.6) {
+  return new Promise((resolve) => {
+    try {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const w = img.width || 1, h = img.height || 1;
+          const scale = Math.min(1, maxW / Math.max(1, w));
+          const tw = Math.max(1, Math.round(w * scale));
+          const th = Math.max(1, Math.round(h * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = tw; canvas.height = th;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, tw, th);
+          const out = canvas.toDataURL('image/jpeg', quality);
+          resolve(out || dataUrl);
+        } catch { resolve(dataUrl); }
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    } catch { resolve(dataUrl); }
+  });
+}
+
+async function makeThumbs(imgs, maxW = 96, quality = 0.6) {
+  const thumbs = [];
+  for (const it of (imgs || [])) {
+    if (!it || !it.data) continue;
+    const t = await toThumbDataURL(it.data, maxW, quality);
+    thumbs.push({ name: it.name || 'image', type: 'image/jpeg', data: t });
+  }
+  return thumbs;
+}
+
 function renderFileList(fileList, opts = {}) {
   const { hideProgress = true } = opts;
   const listEl = uploadListEl;
@@ -557,11 +862,36 @@ function renderFileList(fileList, opts = {}) {
   if (uploadProgressWrap) uploadProgressWrap.classList.add('show');
 }
 
+function sortedFilteredLibrary(items, term, sortKey, dir='desc') {
+  try {
+    const q = String(term || '').trim().toLowerCase();
+    let arr = Array.isArray(items) ? [...items] : [];
+    if (q) {
+      arr = arr.filter(d => String(d.display_name || d.name || '').toLowerCase().includes(q));
+    }
+    const key = String(sortKey || 'date');
+    const get = (d, k) => {
+      if (k === 'pages') return Number(d.pages || d.page_count || 0);
+      if (k === 'chunks') return Number(d.chunks || 0);
+      if (k === 'title') return String(d.display_name || d.name || '').toLowerCase();
+      if (k === 'date') return Number(d.ingested_at || 0);
+      return 0;
+    };
+    const mult = (String(dir||'desc').toLowerCase() === 'asc') ? 1 : -1;
+    if (key === 'title') arr.sort((a,b) => (get(a,'title') < get(b,'title') ? -1 : 1) * mult);
+    else if (key === 'pages') arr.sort((a,b) => (get(a,'pages') - get(b,'pages')) * mult);
+    else if (key === 'chunks') arr.sort((a,b) => (get(a,'chunks') - get(b,'chunks')) * mult);
+    else arr.sort((a,b) => (get(a,'date') - get(b,'date')) * mult);
+    return arr;
+  } catch { return Array.isArray(items) ? items : []; }
+}
+
 function renderLibraryBooks(items) {
   if (!libraryGrid || !libraryEmpty) return;
   if (!Array.isArray(items) || !items.length) {
     libraryGrid.innerHTML = '';
     libraryGrid.classList.add('empty');
+    libraryEmpty.textContent = 'Your library is empty. Ingest a document to get started.';
     libraryEmpty.style.display = 'block';
     return;
   }
@@ -586,6 +916,7 @@ function renderLibraryBooks(items) {
           </div>
           <div class="book-summary">${escapeHTML(snippet).replace(/\n/g, '<br />')}</div>
           <div class="book-actions">
+            <button type="button" class="library-details" data-doc="${escapeHTML(doc.name)}">View details</button>
             <button type="button" class="library-remove" data-doc="${escapeHTML(doc.name)}">Remove</button>
           </div>
         </article>`;
@@ -602,22 +933,44 @@ function renderLibraryBooks(items) {
     }
   });
   updateLibraryActionButtons();
+  // Attach details click handler (open modal on card click, excluding remove button)
+  libraryGrid.querySelectorAll('.book-card').forEach((el) => {
+    if (el.dataset.bound) return;
+    el.dataset.bound = '1';
+    el.addEventListener('click', (evt) => {
+      const target = evt.target;
+      if (target instanceof HTMLElement && (target.closest('.library-remove') || target.closest('.library-details'))) {
+        const btn = target.closest('.library-details');
+        if (btn) {
+          const name = btn.getAttribute('data-doc') || el.getAttribute('data-name');
+          if (name) openDocDetails(name);
+        }
+        return;
+      }
+      const name = el.getAttribute('data-name');
+      if (name) openDocDetails(name);
+    });
+  });
 }
 
 async function refreshLibrary() {
   if (!libraryGrid) return;
   libraryGrid.classList.add('loading');
-  if (libraryEmpty) libraryEmpty.style.display = 'block';
+  if (libraryEmpty) {
+    libraryEmpty.textContent = 'Loading…';
+    libraryEmpty.style.display = 'block';
+  }
   libraryGrid.innerHTML = '';
   try {
     const resp = await fetch(`${API_BASE}/library`, { credentials: 'include' });
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
-    renderLibraryBooks(data.documents || []);
+    __libraryData = Array.isArray(data.documents) ? data.documents : [];
+    renderLibraryBooks(sortedFilteredLibrary(__libraryData, __librarySearch, __librarySort, __libraryDir));
     // Populate the Only document selector
     if (onlyDocSelect) {
       const prev = onlyDocSelect.value;
-      const docs = (data.documents || []).map((d) => String(d.name || '').trim()).filter(Boolean);
+      const docs = (__libraryData || []).map((d) => String(d.name || '').trim()).filter(Boolean);
       onlyDocSelect.innerHTML = '<option value="">All documents</option>' +
         docs.map((n) => `<option value="${escapeHTML(n)}">${escapeHTML(n)}</option>`).join('');
       if (docs.includes(prev)) onlyDocSelect.value = prev; // restore selection
@@ -628,6 +981,23 @@ async function refreshLibrary() {
     libraryGrid.classList.remove('loading');
   }
 }
+
+// Library search/sort handlers
+librarySearchInput?.addEventListener('input', () => {
+  __librarySearch = String(librarySearchInput.value || '').trim();
+  renderLibraryBooks(sortedFilteredLibrary(__libraryData, __librarySearch, __librarySort, __libraryDir));
+});
+librarySortSelect?.addEventListener('change', () => {
+  __librarySort = String(librarySortSelect.value || 'date');
+  renderLibraryBooks(sortedFilteredLibrary(__libraryData, __librarySearch, __librarySort, __libraryDir));
+});
+document.getElementById('library-order')?.addEventListener('click', (e) => {
+  e.preventDefault();
+  __libraryDir = (__libraryDir === 'asc') ? 'desc' : 'asc';
+  const ico = document.getElementById('library-order-icon');
+  if (ico) ico.textContent = (__libraryDir === 'asc') ? '↑' : '↓';
+  renderLibraryBooks(sortedFilteredLibrary(__libraryData, __librarySearch, __librarySort, __libraryDir));
+});
 
 async function removeLibraryDocument(name) {
   try {
@@ -718,7 +1088,7 @@ function startIngestPoll(jobId) {
         createConversation(convTitle);
         const summaryHtml = data.summary_html || '<p>Ingestion complete.</p>';
         appendBotMessage(summaryHtml, { animate: false });
-        recordConversationEntry('', summaryHtml, null);
+        recordConversationEntry('', summaryHtml, null, null);
         // Ask server to generate a concise title for this summary
         maybeUpdateTitleFrom(stripHTML(summaryHtml));
         ingestLog.textContent += '\nIngestion complete.';
@@ -817,7 +1187,7 @@ async function uploadDocuments(files) {
 uploadForm?.addEventListener('submit', (evt) => {
   evt.preventDefault();
   if (!selectedFiles.length) {
-    ingestLog.textContent = 'Select one or more PDFs.';
+    ingestLog.textContent = 'Select one or more documents with text.';
     scrollIngestToBottom();
     return;
   }
@@ -1037,7 +1407,7 @@ function createMessageElement(type, content, opts = {}) {
 }
 
 function appendUserMessage(text, options = {}) {
-  const el = createMessageElement('user', text, { animate: options.animate !== false });
+  const el = createMessageElement('user', text, { animate: options.animate !== false, html: options && options.html === true });
   if (sidebarMedia.matches) setSidebarOpen(false);
   ensureBottomSentinel();
   if (options.scroll !== false) {
@@ -1089,6 +1459,201 @@ function appendBotMessage(html, options = {}) {
   return el;
 }
 
+function renderTraceHTML(trace) {
+  try {
+    if (!trace) return '';
+    const retr = Array.isArray(trace.retrieval) ? trace.retrieval : [];
+    const ctx = Array.isArray(trace.selected_context) ? trace.selected_context : [];
+    const web = Array.isArray(trace.web_sources) ? trace.web_sources : [];
+    const quotes = Array.isArray(trace.quotes) ? trace.quotes : [];
+    const citations = Array.isArray(trace.citations) ? trace.citations : [];
+    const reranker = String(trace.reranker || 'off');
+    const rerankApplied = Boolean(trace.rerank_applied);
+    const retrievalHead = Array.isArray(trace.retrieval_head) ? trace.retrieval_head : [];
+    const selectedHead = Array.isArray(trace.selected_head) ? trace.selected_head : [];
+    const esc = escapeHTML;
+    let html = '<details class="trace"><summary>Trace</summary>';
+    // Reranker info
+    html += `<div><strong>Reranker:</strong> ${esc(reranker)}${rerankApplied ? ' (applied)' : ' (off)'}</div>`;
+    if (retrievalHead.length || selectedHead.length) {
+      html += '<div style="margin-top:6px"><strong>Order (first 5)</strong><div style="display:flex; gap:12px; flex-wrap:wrap">'
+        + `<div><em>Retrieval</em><ul>${retrievalHead.map(x => `<li>${esc(String(x))}</li>`).join('')}</ul></div>`
+        + `<div><em>Selected</em><ul>${selectedHead.map(x => `<li>${esc(String(x))}</li>`).join('')}</ul></div>`
+        + '</div></div>';
+    }
+    const moves = Array.isArray(trace.rerank_moves) ? trace.rerank_moves : [];
+    if (moves.length) {
+      html += '<div style="margin-top:6px"><strong>Reorder impact</strong><ul>'
+        + moves.slice(0, 10).map(m => `<li>${esc(String(m.key))} — moved ${m.delta > 0 ? 'up' : 'down'} ${Math.abs(m.delta)} (old ${m.old+1} → new ${m.new+1})</li>`).join('')
+        + '</ul></div>';
+    }
+    const citeCheck = Array.isArray(trace.citation_check) ? trace.citation_check : [];
+    if (citeCheck.length) {
+      const bad = citeCheck.filter(c => !c.ok);
+      const good = citeCheck.filter(c => c.ok);
+      html += '<div style="margin-top:6px"><strong>Citation validation</strong>'; 
+      if (bad.length) {
+        html += '<div style="color:#991b1b">Weak/Unmatched: ' + bad.map(c => esc(String(c.tag))).join(', ') + '</div>';
+      }
+      if (good.length) {
+        html += '<div>OK: ' + good.map(c => esc(String(c.tag))).join(', ') + '</div>';
+      }
+      html += '</div>';
+    }
+    if (retr.length) {
+      html += '<div><strong>Top retrieval</strong><ul>' + retr.map(r => {
+        const tag = `[${esc(String(r.doc || '?'))} p.${esc(String(r.page || '?'))}]`;
+        const sc = (typeof r.score === 'number') ? r.score.toFixed(3) : esc(String(r.score || ''));
+        return `<li>${tag} — score ${sc}</li>`;
+      }).join('') + '</ul></div>';
+    }
+    if (ctx.length) {
+      html += '<div style="margin-top:6px"><strong>Selected context</strong>' + ctx.map(c => {
+        const tag = `[${esc(String(c.doc || '?'))} p.${esc(String(c.page || '?'))}]`;
+        const sc = (typeof c.score === 'number') ? c.score.toFixed(3) : esc(String(c.score || ''));
+        const sn = esc(String(c.snippet || '')).slice(0, 400);
+        const url = c.url ? ` <a href="${esc(c.url)}" target="_blank" rel="noreferrer">link</a>` : '';
+        const view = (!c.url && String(c.kind || 'doc') === 'doc') ? ` <a href="#" class="view-chip" data-view-doc="${esc(String(c.doc||''))}" data-view-page="${esc(String(c.page||''))}" data-view-needle="${esc(String(c.needle||''))}">view</a>` : '';
+        return `<div style="margin:4px 0">${tag} — ${esc(String(c.kind || 'doc'))} — score ${sc}${url}${view}<br/><small>${sn}</small></div>`;
+      }).join('') + '</div>';
+    }
+    if (citations.length) {
+      html += '<div style="margin-top:6px"><strong>Citations</strong><div>' + citations.map(c => `<span style="display:inline-block; margin:2px 6px 2px 0; padding:2px 6px; border-radius:10px; background:rgba(15,23,42,0.08)">${escapeHTML(String(c))}</span>`).join('') + '</div></div>';
+    }
+    if (web.length) {
+      html += '<div style="margin-top:6px"><strong>Web sources</strong><ul>' + web.map(u => `<li><a href="${esc(String(u))}" target="_blank" rel="noreferrer">${esc(String(u))}</a></li>`).join('') + '</ul></div>';
+    }
+    if (quotes.length) {
+      html += '<div style="margin-top:6px"><strong>Evidence snippets</strong>' + quotes.map(q => {
+        const text = esc(String(q.quote || q.text || ''));
+        const src = esc(String(q.source || q.citation || ''));
+        return `<blockquote style="margin:6px 0; padding-left:10px; border-left:3px solid rgba(15,23,42,0.2)">${text}${src ? `<div><small>${src}</small></div>` : ''}</blockquote>`;
+      }).join('') + '</div>';
+    }
+    html += '</details>';
+    return html;
+  } catch (e) {
+    try { console.warn('trace render failed', e); } catch {}
+    return '';
+  }
+}
+
+// Inline doc page viewer
+function openPageViewer(doc, page, needle) {
+  try {
+    if (!pageViewer || !pageViewerImg) return;
+    resetViewerTransform();
+    pageViewer.style.display = 'flex';
+    pageViewerImg.src = '';
+    const base = API_BASE.replace(/\/api$/, '');
+    const url = `${base}/api/library/page_image?doc=${encodeURIComponent(doc)}&page=${encodeURIComponent(page)}${needle ? `&needle=${encodeURIComponent(needle)}` : ''}`;
+    fetch(url, { credentials: 'include' })
+      .then(r => r.blob())
+      .then(b => { pageViewerImg.src = URL.createObjectURL(b); })
+      .catch(() => { try { pageViewer.style.display = 'none'; } catch {} });
+  } catch {}
+}
+pageViewer?.addEventListener('click', (e) => {
+  const t = e.target;
+  if (!(t instanceof HTMLElement)) return;
+  if (t.classList.contains('doc-backdrop')) {
+    pageViewer.style.display = 'none';
+    try { pageViewerImg.src = ''; } catch {}
+  }
+});
+
+// Generic image preview using the same viewer
+function openImagePreview(url) {
+  try {
+    if (!pageViewer || !pageViewerImg) return;
+    resetViewerTransform();
+    pageViewer.style.display = 'flex';
+    pageViewerImg.src = url || '';
+    // Ensure transform applies after the image has natural dimensions
+    try {
+      pageViewerImg.onload = () => { resetViewerTransform(); };
+    } catch {}
+  } catch {}
+}
+
+document.addEventListener('click', (e) => {
+  const t = e.target;
+  if (!(t instanceof HTMLElement)) return;
+  const link = t.closest('[data-view-doc]');
+  if (link) {
+    e.preventDefault();
+    const d = link.getAttribute('data-view-doc');
+    const p = link.getAttribute('data-view-page');
+    const needle = link.getAttribute('data-view-needle') || '';
+    if (d && p) openPageViewer(d, p, needle);
+    return;
+  }
+  const userImg = t.closest('.user-attach-grid img');
+  if (userImg && userImg instanceof HTMLImageElement) {
+    e.preventDefault();
+    const full = userImg.getAttribute('data-full') || userImg.getAttribute('src');
+    if (full) {
+      try { openImagePreview(full); } catch {}
+    }
+    return;
+  }
+  const rc = t.closest('button.retry-chip');
+  if (rc) {
+    e.preventDefault();
+    const q = document.getElementById('question')?.value || '';
+    const payload = collectAskPayloadFromUI();
+    if (rc.hasAttribute('data-retry-web')) payload.web_enabled = true;
+    if (rc.hasAttribute('data-retry-broaden')) delete payload.only_doc;
+    askQuestion(payload, q || (chatWindow?.querySelector('.message.user:last-of-type')?.textContent || ''));
+    return;
+  }
+});
+
+function collectAskPayloadFromUI() {
+  return {
+    question: (document.getElementById('question')?.value || '').trim(),
+    memory_enabled: true,
+    formula_mode: document.getElementById('formula-mode').checked,
+    strict_docs: document.getElementById('strict-docs')?.checked || false,
+    web_enabled: document.getElementById('web-enabled').checked,
+    exhaustive: document.getElementById('exhaustive').checked,
+    reranker: (() => {
+      const on = document.getElementById('reranker-on')?.checked;
+      if (!on) return 'off';
+      const chosen = (defaultsData && typeof defaultsData.ASK_RERANKER === 'string' && defaultsData.ASK_RERANKER.toLowerCase() !== 'off')
+        ? String(defaultsData.ASK_RERANKER)
+        : 'minilm';
+      return chosen;
+    })(),
+    top_k: Number(document.getElementById('top-k').value || 10),
+    max_batches: Number(document.getElementById('max-batches').value || 6),
+    time_budget: Number(document.getElementById('time-budget').value || 120),
+    history: chatHistory,
+    ...(onlyDocSelect && onlyDocSelect.value ? { only_doc: onlyDocSelect.value } : {}),
+  };
+}
+
+function maybeAppendTrace(trace) {
+  try {
+    const html = renderTraceHTML(trace);
+    if (!html) return;
+    // Ensure only the latest message has a trace chip
+    try {
+      chatWindow?.querySelectorAll('.trace-inline, details.trace').forEach((el) => el.remove());
+    } catch {}
+    const lastBot = chatWindow?.querySelector('.message.bot:last-of-type');
+    if (lastBot) {
+      const wrap = document.createElement('div');
+      wrap.className = 'trace-inline';
+      wrap.innerHTML = html;
+      lastBot.appendChild(wrap);
+    } else {
+      // Fallback: insert as a separate message
+      appendBotMessage(html, { typeset: false, animate: false, scroll: false });
+    }
+  } catch {}
+}
+
 function maybeInsertSummaryMessage(summaryHtml) {
   const hasAny = chatHistory.length > 0 || chatWindow.innerHTML.trim().length > 0;
   if (!hasAny && summaryHtml) {
@@ -1097,11 +1662,45 @@ function maybeInsertSummaryMessage(summaryHtml) {
 }
 
 let askPollHandle = null;
+function updateAskStatusFromLogs(logs) {
+  try {
+    if (!askStatus) return;
+    const exOn = !!document.getElementById('exhaustive')?.checked;
+    const arr = Array.isArray(logs) ? logs : [];
+    let status = '';
+    // Priority: Batch progress > Sweep plan > Reranker > MMR/Searching
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const ln = String(arr[i] || '');
+      if (/^Batch\s+\d+\/\d+/.test(ln)) { status = ln; break; }
+    }
+    if (!status) {
+      for (let i = arr.length - 1; i >= 0; i--) {
+        const ln = String(arr[i] || '');
+        if (ln.startsWith('Sweep plan:')) { status = ln; break; }
+      }
+    }
+    if (!status) {
+      for (let i = arr.length - 1; i >= 0; i--) {
+        const ln = String(arr[i] || '');
+        if (ln.startsWith('Reranker:')) { status = ln; break; }
+      }
+    }
+    if (!status) {
+      for (let i = arr.length - 1; i >= 0; i--) {
+        const ln = String(arr[i] || '');
+        if (/^(MMR selection|MMR done|Searching index|Summarizing with context)/.test(ln)) { status = ln; break; }
+      }
+    }
+    askStatus.textContent = status || '';
+    askStatus.style.display = (exOn && status) ? 'block' : 'none';
+  } catch {}
+}
 async function askQuestion(payload, question) {
   if (askLog) askLog.textContent = 'Working…';
   const sendBtn = askForm?.querySelector('.send-btn');
   if (sendBtn) sendBtn.disabled = true;
   if (askProgress) askProgress.classList.add('active');
+  try { showExPopover(false); } catch {}
   let resp;
   try {
     resp = await fetch(`${API_BASE}/ask/start`, {
@@ -1139,8 +1738,10 @@ async function askQuestion(payload, question) {
         if (d.answer) {
           appendBotMessage(d.answer);
         }
-        if (question) {
-          recordConversationEntry(question, d.answer || '', d.answer_markdown);
+        if (d.trace) { maybeAppendTrace(d.trace); }
+        if (question && !cancelArmed) {
+          recordConversationEntry(question, d.answer || '', d.answer_markdown, pendingUserHtml || null);
+          pendingUserHtml = null;
         }
         if (d.answer) {
           const plain = stripHTML(d.answer);
@@ -1170,6 +1771,44 @@ async function askQuestion(payload, question) {
     return;
   }
   if (askPollHandle) { clearInterval(askPollHandle); askPollHandle = null; }
+  try { localStorage.setItem('anag_active_job', jobId); } catch {}
+  // Turn the send button into a Cancel button during the run
+  let cancelArmed = false;
+  const sendButtonEl = askForm?.querySelector('.send-btn');
+  if (sendButtonEl) {
+    sendButtonEl.disabled = false;
+    sendButtonEl.title = 'Cancel';
+    sendButtonEl.classList.add('is-cancel');
+    try { sendButtonEl.setAttribute('type', 'button'); } catch {}
+    const cancelOnce = async (e) => {
+      if (cancelArmed) return; cancelArmed = true;
+      e?.preventDefault?.();
+      try { await fetch(`${API_BASE}/ask/cancel/${jobId}`, { method: 'POST', credentials: 'include' }); } catch {}
+      // Move cancellation notice to Ask Log; stop progress; hide inline status
+      try {
+        if (askLog) {
+          const prev = String(askLog.textContent || '').trim();
+          askLog.textContent = prev ? (prev + '\nCancelled') : 'Cancelled';
+          try { askLog.scrollTop = askLog.scrollHeight; } catch {}
+        }
+      } catch {}
+      try { if (askProgress) askProgress.classList.remove('active'); } catch {}
+      try { if (askStatus) { askStatus.textContent = ''; askStatus.style.display = 'none'; } } catch {}
+      try {
+        // Persist the user's question as a turn with an empty answer so it remains in conversation memory
+        if (question) {
+          recordConversationEntry(question, '', '', pendingUserHtml || null);
+          pendingUserHtml = null;
+        }
+      } catch {}
+      try { if (sendButtonEl) { sendButtonEl.classList.remove('is-cancel'); sendButtonEl.title = 'Send'; sendButtonEl.setAttribute('type', 'submit'); } } catch {}
+      try { if (askPollHandle) { clearInterval(askPollHandle); askPollHandle = null; } } catch {}
+      try { localStorage.removeItem('anag_active_job'); } catch {}
+      try { removeTempSpacer(); } catch {}
+      try { updateScrollDownBtn(); } catch {}
+    };
+    try { sendButtonEl.addEventListener('click', cancelOnce, { once: true }); } catch {}
+  }
   const poll = async () => {
     try {
       const s = await fetch(`${API_BASE}/ask/status/${jobId}`, { credentials: 'include' });
@@ -1195,7 +1834,8 @@ async function askQuestion(payload, question) {
                 appendBotMessage(d.answer);
               }
               if (question) {
-                recordConversationEntry(question, d.answer || '', d.answer_markdown);
+                recordConversationEntry(question, d.answer || '', d.answer_markdown, pendingUserHtml || null);
+                pendingUserHtml = null;
               }
               if (d.answer) {
                 const plain = stripHTML(d.answer);
@@ -1220,14 +1860,18 @@ async function askQuestion(payload, question) {
         }
       }
       const st = await s.json();
+      if (Array.isArray(st.logs)) updateAskStatusFromLogs(st.logs);
       if (Array.isArray(st.logs) && askLog) { askLog.textContent = st.logs.join('\n'); try { askLog.scrollTop = askLog.scrollHeight; } catch {} }
       if (st.status === 'done') {
         clearInterval(askPollHandle); askPollHandle = null;
+        try { updateAskStatusFromLogs([]); } catch {}
         if (st.answer) {
           appendBotMessage(st.answer);
         }
-        if (question) {
-          recordConversationEntry(question, st.answer || '', st.answer_markdown);
+        if (st.trace) { maybeAppendTrace(st.trace); }
+        if (question && !cancelArmed) {
+          recordConversationEntry(question, st.answer || '', st.answer_markdown, pendingUserHtml || null);
+          pendingUserHtml = null;
         }
         if (st.answer) {
           const plain = stripHTML(st.answer);
@@ -1235,12 +1879,48 @@ async function askQuestion(payload, question) {
         }
         if (sendBtn) sendBtn.disabled = false;
         if (askProgress) askProgress.classList.remove('active');
-      } else if (st.status === 'error' || st.status === 'cancelled') {
+        try { localStorage.removeItem('anag_active_job'); } catch {}
+        try { if (sendButtonEl) { sendButtonEl.classList.remove('is-cancel'); sendButtonEl.title = 'Send'; sendButtonEl.setAttribute('type','submit'); } } catch {}
+        // Inline retry chips if server suggests
+        try {
+          const meta = st.meta || {};
+          if (meta && (meta.not_found || meta.suggest_web || meta.suggest_broaden)) {
+            const last = chatWindow?.querySelector('.message.bot:last-of-type');
+            if (last) {
+              const wrap = document.createElement('div');
+              wrap.style.marginTop = '6px';
+              wrap.className = 'retry-wrap';
+              const chips = [];
+              if (meta.suggest_web) chips.push('<button class="retry-chip" data-retry-web="1">Retry with Web</button>');
+              if (meta.suggest_broaden) chips.push('<button class="retry-chip" data-retry-broaden="1">Broaden to all docs</button>');
+              wrap.innerHTML = `<div class="retry-chips">${chips.join(' ')}</div>`;
+              last.appendChild(wrap);
+            }
+          }
+        } catch {}
+      } else if (st.status === 'cancelled') {
         clearInterval(askPollHandle); askPollHandle = null;
+        try { updateAskStatusFromLogs([]); } catch {}
+        // Log cancellation to Ask Log, no error banner
+        if (askLog) {
+          const prev = String(askLog.textContent || '').trim();
+          askLog.textContent = prev ? (prev + '\nCancelled') : 'Cancelled';
+          try { askLog.scrollTop = askLog.scrollHeight; } catch {}
+        }
+        if (sendBtn) sendBtn.disabled = false;
+        if (askProgress) askProgress.classList.remove('active');
+        try { localStorage.removeItem('anag_active_job'); } catch {}
+        try { if (sendButtonEl) { sendButtonEl.classList.remove('is-cancel'); sendButtonEl.title = 'Send'; sendButtonEl.setAttribute('type','submit'); } } catch {}
+        return;
+      } else if (st.status === 'error') {
+        clearInterval(askPollHandle); askPollHandle = null;
+        try { updateAskStatusFromLogs([]); } catch {}
         if (askLog) askLog.textContent += `\n${st.error || st.status}`;
         showError(st.error || st.status || 'Ask failed');
         if (sendBtn) sendBtn.disabled = false;
         if (askProgress) askProgress.classList.remove('active');
+        try { localStorage.removeItem('anag_active_job'); } catch {}
+        try { if (sendButtonEl) { sendButtonEl.classList.remove('is-cancel'); sendButtonEl.title = 'Send'; sendButtonEl.setAttribute('type','submit'); } } catch {}
       }
     } catch (err) {
       if (askLog) askLog.textContent = `Error: ${err}`;
@@ -1254,34 +1934,93 @@ async function askQuestion(payload, question) {
   askPollHandle = setInterval(poll, 800);
 }
 
-askForm?.addEventListener('submit', (evt) => {
+// Resume polling an active job if the page was refreshed
+try {
+  const jid = localStorage.getItem('anag_active_job');
+  if (jid) {
+    const resumePoll = async () => {
+      try {
+        const s = await fetch(`${API_BASE}/ask/status/${jid}`, { credentials: 'include' });
+        if (!s.ok) { localStorage.removeItem('anag_active_job'); return; }
+        const st = await s.json();
+        if (Array.isArray(st.logs)) updateAskStatusFromLogs(st.logs);
+        if (!st.status || st.status === 'done' || st.status === 'error' || st.status === 'cancelled') {
+          localStorage.removeItem('anag_active_job');
+          return;
+        }
+        askPollHandle = setInterval(async () => {
+          const s2 = await fetch(`${API_BASE}/ask/status/${jid}`, { credentials: 'include' });
+          if (!s2.ok) { clearInterval(askPollHandle); askPollHandle = null; localStorage.removeItem('anag_active_job'); return; }
+          const st2 = await s2.json();
+          if (Array.isArray(st2.logs)) updateAskStatusFromLogs(st2.logs);
+          if (st2.status === 'done' || st2.status === 'error' || st2.status === 'cancelled') {
+            clearInterval(askPollHandle); askPollHandle = null; localStorage.removeItem('anag_active_job');
+            try { if (askStatus) { askStatus.textContent=''; askStatus.style.display='none'; } } catch {}
+          }
+        }, 900);
+      } catch { localStorage.removeItem('anag_active_job'); }
+    };
+    setTimeout(resumePoll, 300);
+  }
+} catch {}
+
+askForm?.addEventListener('submit', async (evt) => {
   evt.preventDefault();
   const question = document.getElementById('question').value.trim();
   if (!question) {
     if (askLog) askLog.textContent = 'Ask a question first.';
     return;
   }
-  // Immediately show user's message in the chat window
-  appendUserMessage(question);
+  let imgs = [];
+  try {
+    if (chatAttachments.length) {
+      const originals = await filesToDataURLs(chatAttachments);
+      const thumbs = await makeThumbs(originals, 96, 0.6);
+      const viewerImgs = await makeThumbs(originals, 1024, 0.85);
+      // Render with light thumbs; store medium previews for viewer in data-full; send originals to API
+      imgs = originals;
+      const grid = '<div class="user-attach-grid" style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:6px;">'
+        + thumbs.map((it, i) => `<img class="user-thumb" src="${it.data}" data-full="${(viewerImgs[i] && viewerImgs[i].data) ? viewerImgs[i].data : it.data}" alt="${escapeHTML(it.name||'image')}" style="width:96px; height:auto; border-radius:8px; border:1px solid rgba(15,23,42,0.12); cursor: zoom-in;" />`).join('')
+        + '</div>';
+      const body = `<div class="user-text">${escapeHTML(question)}</div>`;
+      pendingUserHtml = grid + body;
+    }
+  } catch {}
+  if (Array.isArray(imgs) && imgs.length && pendingUserHtml) {
+    appendUserMessage(pendingUserHtml, { html: true });
+  } else {
+    appendUserMessage(question);
+  }
   const payload = {
     question,
     memory_enabled: true,
     formula_mode: document.getElementById('formula-mode').checked,
-    agents_enabled: document.getElementById('agents-enabled').checked,
+    strict_docs: document.getElementById('strict-docs')?.checked || false,
     web_enabled: document.getElementById('web-enabled').checked,
     exhaustive: document.getElementById('exhaustive').checked,
+    reranker: (() => {
+      const on = document.getElementById('reranker-on')?.checked;
+      if (!on) return 'off';
+      const chosen = (defaultsData && typeof defaultsData.ASK_RERANKER === 'string' && defaultsData.ASK_RERANKER.toLowerCase() !== 'off')
+        ? String(defaultsData.ASK_RERANKER)
+        : 'minilm';
+      return chosen;
+    })(),
     top_k: Number(document.getElementById('top-k').value || 10),
     max_batches: Number(document.getElementById('max-batches').value || 6),
     time_budget: Number(document.getElementById('time-budget').value || 120),
-    reranker: document.getElementById('reranker').value || 'off',
     history: chatHistory,
   };
   if (onlyDocSelect && onlyDocSelect.value) {
     payload.only_doc = onlyDocSelect.value;
   }
+  if (imgs && imgs.length) payload.images = imgs;
   askQuestion(payload, question);
   const qEl = document.getElementById('question');
   if (qEl) qEl.value = '';
+  // Clear attachments after sending
+  chatAttachments.length = 0;
+  renderChatAttachments();
 });
 
 clearChatBtn?.addEventListener('click', () => {
@@ -1302,50 +2041,123 @@ clearChatBtn?.addEventListener('click', () => {
 
 settingsForm?.addEventListener('submit', async (evt) => {
   evt.preventDefault();
-  const payload = {
-    openai_key: document.getElementById('openai-key').value,
-    hf_token: document.getElementById('hf-token').value,
-    serp_key: document.getElementById('serp-key').value,
-    brave_key: document.getElementById('brave-key').value,
-    openai_model: document.getElementById('openai-model').value,
-    hf_model: document.getElementById('hf-model').value,
-    embed_backend: document.getElementById('embed-backend').value,
-    llm_backend: document.getElementById('llm-backend').value,
-    memory_enabled: document.getElementById('settings-memory').checked,
-    memory_tokens: Number(document.getElementById('memory-tokens').value || 1200),
-    memory_file_mb: Number(document.getElementById('memory-file-mb').value || 50),
-    openai_tpm: Number(document.getElementById('openai-tpm').value || 0),
-    openai_rpm: Number(document.getElementById('openai-rpm').value || 0),
-    ask_char_budget: Number(document.getElementById('ask-char-budget').value || 12000),
-    ask_max_batches: Number(document.getElementById('ask-max-batches').value || 6),
-    ask_time_budget: Number(document.getElementById('ask-time-budget').value || 120),
-    ask_exhaustive: document.getElementById('settings-exhaustive').checked,
-    ask_reranker: document.getElementById('settings-reranker').value || 'off',
-    ask_candidates: Number(document.getElementById('ask-candidates').value || 300),
-  };
-  const resp = await fetch(`${API_BASE}/settings`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    credentials: 'include',
-  });
-  if (!resp.ok) {
-    const text = await resp.text();
-    settingsStatus.textContent = `Error: ${text}`;
-    showError(text || 'Failed to save settings');
-    return;
-  }
-  const data = await resp.json();
-  settingsStatus.textContent = data.message || 'Saved.';
-  if (data.defaults) {
-    applyDefaults(data.defaults);
-  }
-  await refreshSettingsStatus();
+  await saveSettingsNow();
 });
+
+function collectSettingsPayload() {
+  const getEl = (id) => document.getElementById(id);
+  return {
+    openai_key: getEl('openai-key')?.value || '',
+    hf_token: getEl('hf-token')?.value || '',
+    serp_key: getEl('serp-key')?.value || '',
+    brave_key: getEl('brave-key')?.value || '',
+    openai_model: getEl('openai-model')?.value || '',
+    hf_model: getEl('hf-model')?.value || '',
+    embed_backend: getEl('embed-backend')?.value || 'hf',
+    llm_backend: getEl('llm-backend')?.value || 'openai',
+    memory_enabled: Boolean(getEl('settings-memory')?.checked),
+    memory_tokens: Number(getEl('memory-tokens')?.value || 1200),
+    memory_file_mb: Number(getEl('memory-file-mb')?.value || 50),
+    openai_tpm: Number(getEl('openai-tpm')?.value || 0),
+    openai_rpm: Number(getEl('openai-rpm')?.value || 0),
+    ask_char_budget: Number(getEl('ask-char-budget')?.value || 12000),
+    ask_max_batches: Number(getEl('ask-max-batches')?.value || 6),
+    ask_time_budget: Number(getEl('ask-time-budget')?.value || 120),
+    ask_exhaustive: Boolean(getEl('settings-exhaustive')?.checked),
+    ask_reranker: (getEl('settings-reranker')?.value || 'minilm'),
+    ask_candidates: Number(getEl('ask-candidates')?.value || 300),
+    web_provider: (getEl('web-provider')?.value || 'auto'),
+  };
+}
+
+async function saveSettingsNow() {
+  try {
+    if (settingsSaveTimer) { clearTimeout(settingsSaveTimer); settingsSaveTimer = null; }
+  } catch {}
+  const payload = collectSettingsPayload();
+  if (settingsStatus) settingsStatus.textContent = 'Saving…';
+  try {
+    const resp = await fetch(`${API_BASE}/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      credentials: 'include',
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      if (settingsStatus) settingsStatus.textContent = `Error: ${text}`;
+      showError(text || 'Failed to save settings');
+      return;
+    }
+    const data = await resp.json();
+    if (settingsStatus) settingsStatus.textContent = data.message || 'Saved.';
+    if (data.defaults) {
+      applyDefaults(data.defaults);
+    }
+    await refreshSettingsStatus();
+  } catch (err) {
+    if (settingsStatus) settingsStatus.textContent = 'Error saving settings';
+    showError(err);
+  }
+}
+
+function scheduleSaveSettings(delay = 600) {
+  try { if (settingsSaveTimer) clearTimeout(settingsSaveTimer); } catch {}
+  settingsSaveTimer = setTimeout(() => { saveSettingsNow(); }, delay);
+}
+
+function setupSettingsAutosave() {
+  if (!settingsForm) return;
+  const inputs = settingsForm.querySelectorAll('input, select');
+  inputs.forEach((el) => {
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    if (type === 'checkbox' || tag === 'select') {
+      el.addEventListener('change', () => { saveSettingsNow(); });
+    } else {
+      if (type !== 'password') {
+        el.addEventListener('input', () => { scheduleSaveSettings(700); });
+      }
+      el.addEventListener('change', () => { saveSettingsNow(); });
+    }
+  });
+}
+
+function iconCheck() {
+  return '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" style="vertical-align:-2px; fill:currentColor"><path d="M9 16.2l-3.5-3.5a1 1 0 1 1 1.4-1.4L9 13.4l8.1-8.1a1 1 0 1 1 1.4 1.4L9 16.2z"/></svg>';
+}
+function iconBang() {
+  return '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" style="vertical-align:-2px; fill:currentColor"><path d="M11 3h2v12h-2V3zm0 14h2v4h-2v-4z"/></svg>';
+}
+function iconRequired() {
+  return '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" style="vertical-align:-2px; stroke:currentColor; fill:none; stroke-width:2"><path d="M12 4v16M4.5 7l15 10M4.5 17l15-10"/></svg>';
+}
+
+function renderKeyStatus(keys) {
+  if (!keys) return '';
+  const parts = [];
+  const order = [
+    ['openai','OpenAI'],
+    ['hf','HF'],
+    ['serpapi','SerpAPI'],
+    ['brave','Brave'],
+  ];
+  for (const [k, label] of order) {
+    const info = keys[k] || {};
+    const ok = info.ok;
+    const req = !!info.required;
+    let icons = '';
+    if (ok === true) icons += iconCheck();
+    else if (ok === false) icons += iconBang();
+    if (req) icons += ' ' + iconRequired();
+    parts.push(`<span class="key-item" data-key="${k}" title="${label}">${label}: ${icons || '—'}</span>`);
+  }
+  return parts.join('  ');
+}
 
 async function refreshSettingsStatus() {
   try {
-    const resp = await fetch(`${API_BASE}/settings`, { credentials: 'include' });
+    const resp = await fetch(`${API_BASE}/settings?verify=1`, { credentials: 'include' });
     if (!resp.ok) { const t = await resp.text(); showError(t || 'Failed to load settings'); return; }
     const data = await resp.json();
     if (data.defaults) {
@@ -1353,12 +2165,7 @@ async function refreshSettingsStatus() {
     }
     const keyStatusEl = document.getElementById('settings-status');
     if (keyStatusEl && data.keys) {
-      keyStatusEl.textContent = [
-        `OpenAI: ${data.keys.openai ? '✅' : '⚠️'}`,
-        `HF: ${data.keys.hf ? '✅' : '⚠️'}`,
-        `SerpAPI: ${data.keys.serpapi ? '✅' : '—'}`,
-        `Brave: ${data.keys.brave ? '✅' : '—'}`,
-      ].join('  ');
+      keyStatusEl.innerHTML = renderKeyStatus(data.keys);
     }
   } catch (err) {
     console.warn('Failed to refresh settings', err);
@@ -1372,6 +2179,13 @@ if (document.readyState === 'loading') {
   refreshSettingsStatus();
 }
 
+// Initialize settings auto-save listeners once DOM is ready
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', setupSettingsAutosave);
+} else {
+  setupSettingsAutosave();
+}
+
 // -------------------------------------------------
 // Conversations (localStorage based)
 function escapeHTML(s) {
@@ -1379,10 +2193,47 @@ function escapeHTML(s) {
 }
 
 function saveConversations() {
+  const payload = { active: activeConvId, conversations };
   try {
-    const payload = { active: activeConvId, conversations };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  } catch {}
+    return;
+  } catch (e1) {
+    // Quota exceeded or serialization too large — compact and retry
+    try {
+      const compact = (src) => {
+        const out = {};
+        for (const [id, conv] of Object.entries(src || {})) {
+          const hist = Array.isArray(conv.history) ? conv.history.slice(-60) : [];
+          const trimmed = hist.map((it) => {
+            const qhtml = (it.q_html && typeof it.q_html === 'string' && it.q_html.length <= 6000) ? it.q_html : null;
+            let ah = it.a_html || '';
+            let am = it.a_markdown || it.a || '';
+            if (typeof ah === 'string' && ah.length > 20000) ah = ah.slice(0, 20000);
+            if (typeof am === 'string' && am.length > 16000) am = am.slice(0, 16000);
+            return { q: it.q || '', q_html: qhtml, a: am || '', a_markdown: am || '', a_html: ah || '' };
+          });
+          out[id] = { id: conv.id, title: conv.title, createdAt: conv.createdAt, updatedAt: conv.updatedAt, history: trimmed };
+        }
+        return out;
+      };
+      const small = { active: activeConvId, conversations: compact(conversations) };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(small));
+      return;
+    } catch (e2) {
+      try {
+        // Last resort: drop previews and keep only last 20 turns
+        const minimal = {};
+        for (const [id, conv] of Object.entries(conversations || {})) {
+          const hist = Array.isArray(conv.history) ? conv.history.slice(-20) : [];
+          const minHist = hist.map((it) => ({ q: it.q || '', a: (it.a_markdown || it.a || '').slice(0, 8000), a_markdown: (it.a_markdown || it.a || '').slice(0, 8000), a_html: (it.a_html || '').slice(0, 12000) }));
+          minimal[id] = { id: conv.id, title: conv.title, createdAt: conv.createdAt, updatedAt: conv.updatedAt, history: minHist };
+        }
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ active: activeConvId, conversations: minimal }));
+      } catch (e3) {
+        try { showError('Storage is full — could not save conversations.'); } catch {}
+      }
+    }
+  }
 }
 
 function renderConversationList() {
@@ -1464,10 +2315,24 @@ async function maybeUpdateTitleFrom(text) {
     // Only auto-title if the title is default-ish
     const isDefault = !current || current === 'New chat' || /^Summary:/i.test(current) || current.length < 4;
     if (!isDefault) return;
+    // Build a richer summary from conversation so far
+    let combined = '';
+    try {
+      const hist = conversations[id].history || chatHistory || [];
+      const recent = hist.slice(-6);
+      const parts = [];
+      for (const turn of recent) {
+        const q = (turn.q || '').trim();
+        const a = (turn.a_markdown || turn.a || '').trim();
+        if (q) parts.push('Q: ' + q);
+        if (a) parts.push('A: ' + a);
+      }
+      combined = parts.join('\n');
+    } catch {}
     const resp = await fetch(`${API_BASE}/chat/title`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: String(text || '').slice(0, 4000) }),
+      body: JSON.stringify({ text: String((combined || text || '')).slice(0, 4000) }),
       credentials: 'include',
     });
     if (!resp.ok) return;
@@ -1477,8 +2342,9 @@ async function maybeUpdateTitleFrom(text) {
   } catch {}
 }
 
-function recordConversationEntry(question, answerHtml, answerMarkdown) {
-  if (!answerHtml && !answerMarkdown) return;
+function recordConversationEntry(question, answerHtml, answerMarkdown, questionHtml) {
+  // Allow saving turns with no answer (e.g., user cancelled) so they persist across refresh
+  if (!question && !answerHtml && !answerMarkdown) return;
   const htmlValue = (answerHtml && answerHtml.trim())
     ? answerHtml
     : (answerMarkdown ? renderMarkdownToHtml(answerMarkdown) : '');
@@ -1487,6 +2353,7 @@ function recordConversationEntry(question, answerHtml, answerMarkdown) {
     : (htmlValue ? stripHTML(htmlValue) : '');
   const entry = {
     q: question,
+    q_html: questionHtml || null,
     a: markdownValue,
     a_markdown: answerMarkdown || markdownValue,
     a_html: htmlValue,
@@ -1514,11 +2381,16 @@ function loadConversation(id) {
   let lastEl = null;
   for (const item of hist) {
     const question = item.q || '';
+    const qhtml = item.q_html || '';
     const markdown = item.a_markdown || item.a || '';
     const html = item.a_html || (markdown ? renderMarkdownToHtml(markdown) : '');
-    if (question) lastEl = appendUserMessage(question, { scroll: false, animate: false });
+    if (qhtml) {
+      lastEl = appendUserMessage(qhtml, { scroll: false, animate: false, html: true });
+    } else if (question) {
+      lastEl = appendUserMessage(question, { scroll: false, animate: false });
+    }
     if (html) lastEl = appendBotMessage(html, { scroll: false, typeset: false, animate: false });
-    normalized.push({ q: question, a: markdown, a_markdown: markdown, a_html: html });
+    normalized.push({ q: question, q_html: qhtml || null, a: markdown, a_markdown: markdown, a_html: html });
   }
   chatHistory.push(...normalized);
   conversations[id].history = normalized;
@@ -1561,11 +2433,17 @@ function deleteConversation(id) {
   if (!conversations[id]) return;
   delete conversations[id];
   if (activeConvId === id) {
-    activeConvId = Object.keys(conversations)[0] || null;
+    const ids = Object.keys(conversations);
+    activeConvId = ids.length ? ids[0] : null;
   }
   saveConversations();
   renderConversationList();
-  loadConversation(activeConvId);
+  if (!activeConvId) {
+    // If no conversations remain, create one and switch to chat
+    createConversation();
+  } else {
+    loadConversation(activeConvId);
+  }
 }
 
 function renameConversation(id, title) {
@@ -1669,6 +2547,7 @@ if (document.readyState === 'loading') {
     positionScrollButton();
     initScrollObserver();
     initDevTools();
+    initImageViewerZoom();
     try { updateScrollDownBtn(); } catch {}
     try {
       const ftr = document.querySelector('.chat-footer');
@@ -1688,11 +2567,43 @@ if (document.readyState === 'loading') {
   positionScrollButton();
   initScrollObserver();
   initDevTools();
+  initImageViewerZoom();
   try { updateScrollDownBtn(); } catch {}
+}
+
+// Zoom & pan interactions for page/image viewer
+let __viewer = { s: 1 };
+function applyViewerTransform() {
+  try {
+    if (!pageViewerImg) return;
+    const s = Math.max(0.25, Math.min(12, (__viewer.s || 1)));
+    pageViewerImg.style.maxWidth = '90vw';
+    pageViewerImg.style.maxHeight = '90vh';
+    pageViewerImg.style.transformOrigin = 'center center';
+    pageViewerImg.style.transform = `scale(${s})`;
+  } catch {}
+}
+function resetViewerTransform() { __viewer = { s: 1 }; applyViewerTransform(); }
+function initImageViewerZoom() {
+  if (!pageViewerImg) return;
+  try { pageViewerImg.style.transition = 'transform .05s linear'; } catch {}
+  pageViewerImg.addEventListener('wheel', (e) => {
+    try {
+      e.preventDefault();
+      // Scroll up = zoom in, scroll down = zoom out
+      const dir = e.deltaY < 0 ? 1.12 : 0.89;
+      __viewer.s = Math.max(0.25, Math.min(12, (__viewer.s || 1) * dir));
+      applyViewerTransform();
+    } catch {}
+  }, { passive: false });
+  pageViewerImg.addEventListener('dblclick', () => { resetViewerTransform(); });
 }
 
 function initDevTools() {
   const statusEl = document.getElementById('dev-status');
+  const consoleInput = document.getElementById('dev-console-input');
+  const consoleRun = document.getElementById('dev-console-run');
+  const consoleOut = document.getElementById('dev-console-output');
   async function callAdmin(path) {
     const url = `${API_BASE}/admin/${path}`;
     try {
@@ -1703,9 +2614,117 @@ function initDevTools() {
       if (statusEl) statusEl.textContent = `Error: ${err}`;
     }
   }
+  async function refreshAdminStatus() {
+    try {
+      const resp = await fetch(`${API_BASE}/admin/status`, { credentials: 'include' });
+      const text = await resp.text();
+      let obj = text; try { obj = JSON.parse(text); } catch {}
+      if (statusEl) {
+        if (typeof obj === 'object') {
+          const ns = Array.isArray(obj.namespaces) ? obj.namespaces.length : 0;
+          statusEl.textContent = `Docs: ${obj.total_rows || 0} rows across ${ns} namespaces • Users: ${obj.users || 0} • Memory files: ${obj.memory_files || 0}`;
+        } else {
+          statusEl.textContent = String(obj);
+        }
+      }
+    } catch (err) {
+      if (statusEl) statusEl.textContent = `Error loading status: ${err}`;
+    }
+  }
+  async function runConsoleCommand() {
+    if (!consoleInput || !consoleOut) return;
+    const raw = String(consoleInput.value || '').trim();
+    if (!raw) return;
+    const show = (obj, ok=true) => {
+      try {
+        const text = (typeof obj === 'string') ? obj : JSON.stringify(obj, null, 2);
+        consoleOut.textContent = text;
+        if (statusEl) statusEl.textContent = ok ? 'OK' : 'Error';
+      } catch { consoleOut.textContent = String(obj); }
+    };
+    try {
+      const parts = raw.split(/\s+/);
+      const first = (parts[0] || '').toLowerCase();
+      const second = (parts[1] || '').replace(/^\//, '').toLowerCase();
+      const third = (parts[2] || '').toLowerCase();
+      const isSlashForm = first.startsWith('/');
+      const op = isSlashForm ? first.slice(1) : first; // accept with or without leading '/'
+
+      const doGet = async (p) => {
+        const url = `${API_BASE}/admin/${p}`;
+        const resp = await fetch(url, { credentials: 'include' });
+        const text = await resp.text();
+        let obj = text; try { obj = JSON.parse(text); } catch {}
+        show(obj, resp.ok);
+      };
+      const doPost = async (p) => {
+        const url = `${API_BASE}/admin/${p}`;
+        const resp = await fetch(url, { method: 'POST', credentials: 'include' });
+        const text = await resp.text();
+        let obj = text; try { obj = JSON.parse(text); } catch {}
+        show(obj, resp.ok);
+      };
+
+      // Friendly shorthands
+      if (!op) { show('Enter a command. Example: get usage'); return; }
+      if (op === 'usage') return void doGet('usage');
+      if (op === 'users') return void doGet('users');
+      if (op === 'rebuild' || op === 'rebuild_index') return void doPost('rebuild_index');
+      if (op === 'scan') {
+        const name = parts.slice(1).join(' ').trim();
+        if (!name) { show('Usage: scan <document name>'); return; }
+        const resp = await fetch(`${API_BASE}/admin/scan_doc?name=${encodeURIComponent(name)}`, { credentials: 'include' });
+        const text = await resp.text(); let obj = text; try { obj = JSON.parse(text); } catch {}
+        show(obj, resp.ok); return;
+      }
+      if (op === 'purge') {
+        const name = parts.slice(1).join(' ').trim();
+        if (!name) { show('Usage: purge <document name>'); return; }
+        const resp = await fetch(`${API_BASE}/admin/purge_doc?name=${encodeURIComponent(name)}`, { method: 'POST', credentials: 'include' });
+        const text = await resp.text(); let obj = text; try { obj = JSON.parse(text); } catch {}
+        show(obj, resp.ok); return;
+      }
+      if (op === 'clear') {
+        let endpoint = null;
+        if (second === 'settings') endpoint = 'clear_settings';
+        else if (second === 'memory') endpoint = 'clear_memory';
+        else if (second === 'all') endpoint = 'clear_all';
+        if (!endpoint) { show('Usage: clear settings|memory|all'); return; }
+        return void doPost(endpoint);
+      }
+
+      // Verb + arg forms
+      if (op === 'get') {
+        if (!second) { show('Usage: get <path> (e.g., get usage)'); return; }
+        return void doGet(second);
+      }
+      if (op === 'post') {
+        if (!second) { show('Usage: post <path> (e.g., post rebuild_index)'); return; }
+        return void doPost(second);
+      }
+
+      show('Unknown command. Try: get usage, get users, rebuild, clear settings');
+    } catch (err) {
+      show(String(err), false);
+    }
+  }
   document.getElementById('dev-clear-settings')?.addEventListener('click', () => callAdmin('clear_settings'));
   document.getElementById('dev-clear-memory')?.addEventListener('click', () => callAdmin('clear_memory'));
   document.getElementById('dev-clear-all')?.addEventListener('click', () => callAdmin('clear_all'));
+  document.getElementById('dev-purge-libraries')?.addEventListener('click', async () => {
+    const sure = confirm('Purge ALL users\' libraries across all namespaces? This cannot be undone.');
+    if (!sure) return;
+    await callAdmin('purge_all_libraries');
+    try { await refreshLibrary(); } catch {}
+  });
+  // (Removed) Attach sources helper; reingest instead
+  // Update status initially and on a timer
+  refreshAdminStatus();
+  try { setInterval(refreshAdminStatus, 8000); } catch {}
+  consoleRun?.addEventListener('click', runConsoleCommand);
+  consoleInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); runConsoleCommand(); }
+  });
   document.getElementById('dev-clear-chats')?.addEventListener('click', () => {
     try {
       const keys = Object.keys(localStorage);

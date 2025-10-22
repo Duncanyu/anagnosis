@@ -5,7 +5,7 @@ from api.services.summarize import summarize
 from api.auth.middleware import require_auth
 from api.db.models import User
 
-router = APIRouter(prefix="/query", tags=["query"])
+router = APIRouter(prefix="/api/query", tags=["query"])
 
 class QueryRequest(BaseModel):
     question: str

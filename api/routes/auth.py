@@ -13,6 +13,7 @@ from api.auth.security import (
     ACCESS_TOKEN_EXPIRE_DAYS
 )
 from api.auth.middleware import get_current_user, require_auth, is_dev_user
+import os
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -71,13 +72,14 @@ def login(request: LoginRequest, response: Response, db: Session = Depends(get_d
         expires_delta=timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
     )
     
+    cookie_secure = os.getenv("COOKIE_SECURE", "false").strip().lower() in {"1","true","yes","on"}
     response.set_cookie(
         key="access_token",
         value=access_token,
         httponly=True,
         max_age=ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
         samesite="lax",
-        secure=False  # Set to True in production with HTTPS
+        secure=cookie_secure
     )
     
     return {

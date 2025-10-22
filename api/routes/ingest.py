@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import pathlib
 import shutil
 import tempfile
 import threading
 import uuid
 from typing import Any, Dict, List, Sequence
+import time
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import JSONResponse
@@ -13,7 +15,10 @@ from fastapi.responses import JSONResponse
 from api.auth.middleware import require_auth
 from api.db.models import User
 from api.services import pipeline
+from api.services.pipeline import PipelineCancelled
 from api.routes.settings import apply_env_for_user
+from api.core.rate_limit import rate_limiter
+from api.services import usage as usage_service
 
 try:
     import markdown as mdlib
@@ -122,6 +127,15 @@ def _start_ingest_job(
                         job["status"] = "error"
                         job["error"] = "Missing OpenAI API key"
                 return
+            # Hard timeout (Phase 4): default 10 minutes
+            try:
+                tout = float(os.environ.get("INGEST_TIMEOUT_SEC", "600"))
+            except Exception:
+                tout = 600.0
+            deadline = time.time() + max(30.0, tout)
+
+            def should_cancel() -> bool:
+                return time.time() >= deadline
             def log(msg: str) -> None:
                 nonlocal doc_state
                 if msg.startswith("Loading "):
@@ -223,6 +237,7 @@ def _start_ingest_job(
                 paths,
                 progress=log,
                 progress_pct=update_pct,
+                should_cancel=should_cancel,
                 user_id=str(job_info["user_id"]),
             )
             summary_md = result.get("doc_summary") or "No documents ingested."
@@ -235,6 +250,13 @@ def _start_ingest_job(
                     job["status"] = "done"
                     job["progress"] = 100
                     job.setdefault("logs", []).append("Ingestion complete.")
+        except PipelineCancelled:
+            with INGEST_LOCK:
+                job = INGEST_JOBS.get(job_id)
+                if job is not None:
+                    job["status"] = "cancelled"
+                    job["error"] = "Ingestion timed out"
+                    job.setdefault("logs", []).append("Ingestion timed out.")
         except Exception as exc:
             with INGEST_LOCK:
                 job = INGEST_JOBS.get(job_id)
@@ -276,27 +298,37 @@ async def api_ingest(
     files: List[UploadFile] = File(...),
     user: User = Depends(require_auth),
 ) -> JSONResponse:
+    if not rate_limiter.allow(str(user.id), "ingest"):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded for ingest. Try again shortly.")
     if not files:
-        raise HTTPException(status_code=400, detail="Upload one or more PDFs.")
+        raise HTTPException(status_code=400, detail="Upload one or more documents with text.")
     tmp_path = pathlib.Path(tempfile.mkdtemp(prefix="anag_upload_"))
     paths: List[pathlib.Path] = []
     names: List[str] = []
     try:
         for upload in files:
-            if not upload.filename.lower().endswith(".pdf"):
-                raise HTTPException(
-                    status_code=400, detail=f"Unsupported file: {upload.filename}"
-                )
-            dest = tmp_path / upload.filename
+            safe_name = pathlib.Path(upload.filename).name
+            dest = tmp_path / safe_name
             data = await upload.read()
             dest.write_bytes(data)
+            # Persist a copy for the inline viewer
+            try:
+                persist_dir = pathlib.Path("artifacts") / "docs" / str(user.id)
+                persist_dir.mkdir(parents=True, exist_ok=True)
+                (persist_dir / safe_name).write_bytes(data)
+            except Exception:
+                pass
             paths.append(dest)
-            names.append(upload.filename)
+            names.append(safe_name)
     except Exception:
         shutil.rmtree(tmp_path, ignore_errors=True)
         raise
 
     job_id = _start_ingest_job(paths, tmp_path, names, user_id=str(user.id))
+    try:
+        usage_service.record(str(user.id), "ingest")
+    except Exception:
+        pass
     payload = _ingest_job_payload(job_id, user_id=str(user.id))
     return JSONResponse(payload)
 

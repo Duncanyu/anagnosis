@@ -1,8 +1,18 @@
 import os, pathlib, datetime, re
 from typing import List, Dict, Iterable, Optional, Union
 import numpy as np
-import onnxruntime as ort
-from transformers import AutoTokenizer
+# Optional ONNX Runtime; degrade gracefully if unavailable
+try:
+    import onnxruntime as ort  # type: ignore
+except Exception:
+    ort = None
+# Lazy import of transformers to avoid hard dependency unless SFT is used
+AutoTokenizer = None
+try:
+    from transformers import AutoTokenizer as _HF_AutoTokenizer  # type: ignore
+    AutoTokenizer = _HF_AutoTokenizer
+except Exception:
+    AutoTokenizer = None
 from api.services import formula_cls
 
 _LOADED = False
@@ -72,6 +82,22 @@ def _load(target_dir: Optional[Union[pathlib.Path, str]] = None):
     target_dir = pathlib.Path(target_dir)
     if _LOADED and _TARGET_DIR is not None and target_dir.resolve() == pathlib.Path(_TARGET_DIR).resolve():
         return _SESS, _TOK
+    # If ONNX Runtime is not available, disable scorer cleanly
+    if ort is None:
+        _LOADED = False
+        _SESS, _TOK = None, None
+        _INFO = {
+            "loaded": False,
+            "path": str(target_dir),
+            "max_len": 512,
+            "backend": "onnxruntime",
+            "error": "onnxruntime not installed",
+        }
+        try:
+            print("[formula_cls] ONNX Runtime not available; formula scoring disabled.")
+        except Exception:
+            pass
+        return _SESS, _TOK
     onnx_path = target_dir / "model.onnx"
     if not onnx_path.exists():
         _LOADED = False
@@ -88,6 +114,8 @@ def _load(target_dir: Optional[Union[pathlib.Path, str]] = None):
             pass
         return _SESS, _TOK
     try:
+        if AutoTokenizer is None:
+            raise RuntimeError("transformers not available")
         tok = AutoTokenizer.from_pretrained(str(target_dir))
     except Exception as exc:
         _LOADED = False
