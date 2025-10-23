@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=15" />
+  <link rel="stylesheet" href="/static/app.css?v=17" />
     <style>
 :root{
   --header-h:96px;      /* runtime-measured header height (fallback) */
@@ -210,6 +210,57 @@ body::before{
 .ex-popover .ex-fields label{ display:flex; gap:6px; align-items:center; font-size:.80rem; color:#0f172a; background:transparent; border:none; padding:0 }
 .ex-popover .ex-fields label span{ min-width:120px; font-weight:600; }
 .ex-popover .ex-fields input[type="number"]{ width:100px; text-align:center; font-size:.80rem; border:1px solid var(--accent-border); border-radius:8px; padding:2px 6px; }
+
+/* Actions panel styling */
+.actions-trigger-btn{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.2s ease;
+}
+.actions-trigger-btn:hover{
+  opacity: 0.7;
+}
+.action-btn{ 
+  display: flex; 
+  align-items: center; 
+  gap: 10px; 
+  padding: 10px 14px; 
+  background: linear-gradient(135deg, rgba(79, 70, 229, 0.06), rgba(129, 140, 248, 0.04)); 
+  border: 1px solid rgba(79, 70, 229, 0.2); 
+  border-radius: 10px; 
+  cursor: pointer; 
+  transition: all 0.2s ease; 
+  font-size: 0.85rem; 
+  font-weight: 500; 
+  color: #1e293b; 
+  text-align: left; 
+  width: 100%;
+}
+.action-btn:hover{ 
+  background: linear-gradient(135deg, rgba(79, 70, 229, 0.12), rgba(129, 140, 248, 0.08)); 
+  border-color: rgba(79, 70, 229, 0.35); 
+  transform: translateY(-1px); 
+  box-shadow: 0 4px 12px -4px rgba(79, 70, 229, 0.25);
+}
+.action-btn:active{ 
+  transform: translateY(0); 
+  box-shadow: 0 2px 6px -2px rgba(79, 70, 229, 0.2);
+}
+.action-btn .action-label{ 
+  flex: 1;
+}
 .chat-settings-inline input[type="number"]{ height:20px; padding:0 6px; width:52px; font-size:.68rem; text-align:center; -moz-appearance:textfield; border-radius:999px }
 .chat-settings-inline select{ height:20px; padding:0 12px 0 8px; font-size:.68rem; max-width:120px; border-radius:999px }
 .chat-settings-inline input[type="checkbox"]{width:14px; height:14px}
@@ -593,7 +644,7 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
           <button data-tab="ask">Conversations</button>
           <button data-tab="settings">Settings</button>
           {% if user and user.get('is_dev') %}
-          <button data-tab="dev">Developer Panel</button>
+          <button data-tab="dev">Dev Panel</button>
           {% endif %}
         </nav>
         <button type="button" id="toggle-sidebar" class="sidebar-toggle" aria-label="Toggle chats" aria-expanded="false" aria-controls="conversation-list">
@@ -750,8 +801,8 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
                     <label><input type="checkbox" id="web-enabled" /><span>Web search</span></label>
                     <label><input type="checkbox" id="strict-docs" /><span>RAG only</span></label>
                     <label><input type="checkbox" id="exhaustive" {% if defaults["ASK_EXHAUSTIVE"] %}checked{% endif %} /><span>Exhaustive sweep</span></label>
-                    <!-- Exhaustive options moved to floating popover to keep controls clean -->
                     <label><input type="checkbox" id="reranker-on" /><span>Reranker</span></label>
+                    <label><button type="button" id="actions-trigger" class="actions-trigger-btn">⚡ Actions</button></label>
                     <label><span>Top-K</span><input type="number" id="top-k" value="10" min="1" max="50" /></label>
                     <label><span>Document:</span>
                       <select id="only-doc">
@@ -908,7 +959,6 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
     <script id="bootstrap-settings" type="application/json">{{ defaults | tojson | safe }}</script>
     <script id="bootstrap-auth" type="application/json">{{ {"user": user} | tojson | safe }}</script>
     <div id="sidebar-backdrop"></div>
-    <!-- Floating popover for Exhaustive sweep options -->
     <div id="ex-popover" class="ex-popover" style="display:none; position:fixed; z-index:2000;">
       <div class="ex-panel" role="dialog" aria-modal="false" aria-label="Exhaustive options">
         <div class="ex-inner">
@@ -921,7 +971,55 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
       </div>
     </div>
 
-    <!-- Page viewer modal -->
+    <div id="actions-popover" class="ex-popover" style="display:none; position:fixed; z-index:2000;">
+      <div class="ex-panel" role="dialog" aria-modal="false" aria-label="Quick actions">
+        <div class="ex-inner" style="padding: 12px 14px;">
+          <div class="ex-header" style="margin-bottom: 10px;">⚡ Quick Actions</div>
+          <div class="actions-grid" style="display: grid; grid-template-columns: 1fr; gap: 6px; max-height: 60vh; overflow-y: auto;">
+            <button type="button" class="action-btn" data-action="generate_quiz" data-params='{"count":10}'>
+              <span class="action-label">Generate Quiz</span>
+            </button>
+            <button type="button" class="action-btn" data-action="followup_questions">
+              <span class="action-label">Suggest Follow-ups</span>
+            </button>
+            <button type="button" class="action-btn" data-action="generate_formula_sheet">
+              <span class="action-label">Generate Formula Sheet</span>
+            </button>
+            <button type="button" class="action-btn" data-action="summarize_docs">
+              <span class="action-label">Summarize Documents</span>
+            </button>
+            <button type="button" class="action-btn" data-action="mindmap_outline">
+              <span class="action-label">Create Mind Map</span>
+            </button>
+            <button type="button" class="action-btn" data-action="compare_sources">
+              <span class="action-label">Compare Sources</span>
+            </button>
+            <button type="button" class="action-btn" data-action="simplify_explanation">
+              <span class="action-label">Simplify Explanation</span>
+            </button>
+            <button type="button" class="action-btn" data-action="cite_sources_only">
+              <span class="action-label">List Citations</span>
+            </button>
+            <button type="button" class="action-btn" data-action="expand_detail">
+              <span class="action-label">Expand Answer</span>
+            </button>
+            <button type="button" class="action-btn" data-action="translate_answer">
+              <span class="action-label">Translate Answer</span>
+            </button>
+            <button type="button" class="action-btn" data-action="debug_reasoning_trace">
+              <span class="action-label">Show Reasoning</span>
+            </button>
+            <button type="button" class="action-btn" data-action="detect_gaps">
+              <span class="action-label">Identify Knowledge Gaps</span>
+            </button>
+            <button type="button" class="action-btn" data-action="recommend_new_docs">
+              <span class="action-label">Recommend Documents</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div id="page-viewer" style="display:none; position:fixed; inset:0; z-index:2200; align-items:center; justify-content:center;">
       <div class="doc-backdrop" style="position:absolute; inset:0; background:rgba(0,0,0,0.45);"></div>
       <div style="position:relative; background:#fff; border-radius:12px; box-shadow:0 28px 80px -24px rgba(15,23,42,0.55); max-width:90vw; max-height:90vh; overflow:hidden;">
@@ -943,14 +1041,13 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
     </script>
     <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <!-- Document details modal -->
     <div id="doc-details-modal" class="doc-modal" aria-hidden="true" style="position:fixed; inset:0; display:none; align-items:center; justify-content:center; z-index:2000;">
       <div class="doc-backdrop" style="position:absolute; inset:0; background:rgba(0,0,0,0.35);"></div>
       <div class="doc-panel" role="dialog" aria-modal="true" aria-label="Document details" style="position:relative; background:#fff; border-radius:14px; box-shadow:0 30px 80px -20px rgba(0,0,0,0.45); width:min(880px, 92vw); max-height:86vh; overflow:auto;">
         <div class="doc-inner" style="padding:16px 18px 20px 18px"></div>
       </div>
     </div>
-    <script src="/static/app.js?v=43"></script>
+  <script src="/static/app.js?v=64"></script>
 <script id="sticky-autosize">
 (function(){
   const root = document.documentElement;
@@ -964,14 +1061,12 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
     const f = document.querySelector('.chat-footer');
     if(!f) return;
     const h = Math.ceil(f.getBoundingClientRect().height);
-    // Avoid writing zero when Ask tab is hidden to prevent visible snap later
     if (h > 0) root.style.setProperty('--footer-h', h+'px');
   };
   const setSidebarW = () => {
     const s = document.querySelector('.chat-sidebar');
     if(!s) return;
     const w = Math.ceil(s.getBoundingClientRect().width);
-    // Avoid writing zero width when hidden
     if (w > 0) root.style.setProperty('--sidebar-w', w+'px');
   };
   const ro = new ResizeObserver(()=>{ setHeaderH(); setFooterH(); setSidebarW(); });
@@ -996,7 +1091,6 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
     ta.style.overflowY = (ta.scrollHeight > maxH) ? 'auto' : 'hidden';
   };
   ['input','change'].forEach(ev => ta.addEventListener(ev, grow));
-  // Grow once on load and when the form is focused (in case of autofill/history)
   window.addEventListener('load', grow);
   ta.addEventListener('focus', grow);
 })();

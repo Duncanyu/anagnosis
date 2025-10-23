@@ -1,5 +1,5 @@
 const tabs = document.querySelectorAll('.anag-tabs button');
-try { console.info('[anag-ui] app.js v35 loaded'); } catch {}
+try { console.info('[anag-ui] app.js v45 loaded (workspace)'); } catch {}
 const panels = document.querySelectorAll('.tab-panel');
 const uploadForm = document.getElementById('upload-form');
 const ingestLog = document.getElementById('ingest-log');
@@ -642,6 +642,117 @@ exCheckbox?.addEventListener('change', () => {
   } catch {}
 });
 
+// Actions popover: show panel on button click, not a toggle
+const actionsPopover = document.getElementById('actions-popover');
+const actionsTrigger = document.getElementById('actions-trigger');
+function positionActionsPopover() {
+  try {
+    if (!actionsPopover || !actionsTrigger) return;
+    const r = actionsTrigger.getBoundingClientRect();
+    const panel = actionsPopover.querySelector('.ex-panel');
+    const pad = 8;
+    const x = Math.max(8, Math.min((r.left + (r.width/2) - 140), window.innerWidth - 300));
+    const y = Math.max(8, r.top - (panel?.offsetHeight || 400) - 12);
+    actionsPopover.style.left = x + 'px';
+    actionsPopover.style.top = y + 'px';
+  } catch {}
+}
+function showActionsPopover(show) {
+  try {
+    if (!actionsPopover) return;
+    actionsPopover.style.display = show ? 'block' : 'none';
+    if (show) {
+      positionActionsPopover();
+      window.addEventListener('resize', positionActionsPopover);
+      window.addEventListener('scroll', positionActionsPopover, true);
+      document.addEventListener('click', handleActionsOutside, true);
+    } else {
+      window.removeEventListener('resize', positionActionsPopover);
+      window.removeEventListener('scroll', positionActionsPopover, true);
+      document.removeEventListener('click', handleActionsOutside, true);
+    }
+  } catch {}
+}
+function handleActionsOutside(e){
+  try {
+    if (!actionsPopover || actionsPopover.style.display === 'none') return;
+    const t = e.target;
+    if (!(t instanceof Node)) return;
+    if (!actionsPopover.contains(t) && !actionsTrigger.contains(t)) {
+      showActionsPopover(false);
+    }
+  } catch {}
+}
+actionsTrigger?.addEventListener('click', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  try {
+    const isVisible = actionsPopover && actionsPopover.style.display === 'block';
+    showActionsPopover(!isVisible);
+  } catch {}
+});
+
+// Handle action button clicks
+actionsPopover?.addEventListener('click', async (e) => {
+  try {
+    const btn = e.target.closest('.action-btn');
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const actionId = btn.getAttribute('data-action');
+    const paramsStr = btn.getAttribute('data-params');
+    let params = null;
+    if (paramsStr) {
+      try { params = JSON.parse(paramsStr); } catch {}
+    }
+    
+    if (actionId) {
+      showActionsPopover(false);
+      
+      // Actions that don't need immediate user message
+      const noImmediateMessageActions = new Set([
+        'enable_web',
+        'broaden_docs',
+        'select_doc',
+        'set_top_k',
+        'toggle_reranker',
+        'strict_docs_only',
+        'exhaustive_search',
+        'upload_docs'
+      ]);
+      
+      // Show user message for most actions (so there's context for the action)
+      if (!noImmediateMessageActions.has(actionId)) {
+        try {
+          const actionLabel = btn.querySelector('.action-label')?.textContent?.trim() || actionId;
+          if (actionLabel) {
+            appendUserMessage(actionLabel);
+            // Persist immediately so it's not lost on refresh; mark as pending to complete later
+            try { 
+              recordConversationEntry(actionLabel, '', '', null); 
+              window.__pendingActionQuestion = actionLabel; 
+            } catch {}
+          }
+        } catch {}
+      }
+      
+      // Special handling for formula sheet - enable formula mode first
+      if (actionId === 'generate_formula_sheet') {
+        const formulaCheckbox = document.getElementById('formula-mode');
+        if (formulaCheckbox && !formulaCheckbox.checked) {
+          formulaCheckbox.checked = true;
+        }
+      }
+      
+      await performAction(actionId, params);
+    }
+  } catch (err) {
+    console.error('Action click error:', err);
+    showError(err && err.message ? err.message : String(err));
+  }
+});
+
 function switchTab(target) {
   tabs.forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === target));
   // If switching to Ask, pre-measure layout by briefly making it render offscreen
@@ -962,6 +1073,27 @@ async function refreshLibrary() {
     const resp = await fetch(`${API_BASE}/library`, { credentials: 'include' });
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
+    // Helper to complete last pending turn or create a new one
+    const updateOrRecord = (q, ansHtml, ansMd) => {
+      try {
+        const last = chatHistory[chatHistory.length - 1];
+        if (last && String(last.q || '') === String(q || '') && !(last.a_markdown || last.a || last.a_html)) {
+          last.a_html = ansHtml || '';
+          last.a_markdown = ansMd || (ansHtml ? stripHTML(ansHtml) : '');
+          last.a = last.a_markdown;
+          if (activeConvId && conversations[activeConvId]) {
+            const conv = conversations[activeConvId];
+            conv.history = [...chatHistory];
+            conv.updatedAt = Date.now();
+            conversations[activeConvId] = conv;
+            saveConversations();
+            renderConversationList();
+          }
+        } else {
+          recordConversationEntry(q, ansHtml || '', ansMd || '');
+        }
+      } catch { recordConversationEntry(q, ansHtml || '', ansMd || ''); }
+    };
     __libraryData = Array.isArray(data.documents) ? data.documents : [];
     renderLibraryBooks(sortedFilteredLibrary(__libraryData, __librarySearch, __librarySort, __libraryDir));
     // Populate the Only document selector
@@ -1630,15 +1762,30 @@ function collectAskPayloadFromUI() {
   };
 }
 
-function maybeAppendTrace(trace) {
+function maybeAppendTrace(trace, targetEl = null) {
   try {
     const html = renderTraceHTML(trace);
-    if (!html) return;
+    if (!html) {
+      // If no trace payload but a target element exists, move any existing trace under it
+      try {
+        if (targetEl && chatWindow) {
+          const existing = chatWindow.querySelector('.trace-inline, details.trace');
+          if (existing) {
+            // Ensure only one trace: remove any other extra traces first
+            chatWindow.querySelectorAll('.trace-inline, details.trace').forEach((el, idx) => {
+              if (idx > 0) el.remove();
+            });
+            targetEl.appendChild(existing);
+          }
+        }
+      } catch {}
+      return;
+    }
     // Ensure only the latest message has a trace chip
     try {
       chatWindow?.querySelectorAll('.trace-inline, details.trace').forEach((el) => el.remove());
     } catch {}
-    const lastBot = chatWindow?.querySelector('.message.bot:last-of-type');
+    const lastBot = targetEl || chatWindow?.querySelector('.message.bot:last-of-type');
     if (lastBot) {
       const wrap = document.createElement('div');
       wrap.className = 'trace-inline';
@@ -1649,6 +1796,987 @@ function maybeAppendTrace(trace) {
       appendBotMessage(html, { typeset: false, animate: false, scroll: false });
     }
   } catch {}
+}
+
+// Render assistant-suggested actions (buttons) and optional next_steps
+function maybeRenderActions(actions, next_steps, targetBotMessage = null) {
+  try {
+    const hasActions = Array.isArray(actions) && actions.length > 0;
+    const hasNextSteps = Array.isArray(next_steps) && next_steps.length > 0;
+    
+    if (!hasActions && !hasNextSteps) {
+      return;
+    }
+    
+    console.log('[UI] Rendering actions:', hasActions ? actions.length : 0, 'next steps:', hasNextSteps ? next_steps.length : 0);
+    
+    // Remove any existing action blocks (only show on latest message)
+    try { chatWindow?.querySelectorAll('.action-inline').forEach((el) => el.remove()); } catch (e) {}
+    
+    // Use provided element or find the last bot message
+    const lastBot = targetBotMessage || chatWindow?.querySelector('.message.bot:last-of-type');
+    
+    if (!lastBot) {
+      console.warn('[UI] No bot message found to attach actions to');
+      return;
+    }
+    
+    const esc = escapeHTML;
+    const wrap = document.createElement('div');
+    wrap.className = 'action-inline';
+    const parts = [];
+    const btns = [];
+  // Control-style actions that should not always appear in the main row
+  const controlActionIds = new Set(['enable_web']);
+    
+    // Process actions only if they exist
+    if (hasActions) {
+      for (const rawA of actions) {
+      try {
+        if (!rawA) {
+          continue;
+        }
+        // Normalize string items to objects: 'enable_web' -> { id: 'enable_web', label: 'Enable web' }
+        let a = rawA;
+        if (typeof rawA === 'string') {
+          a = { id: rawA, label: rawA };
+        }
+        if (typeof a !== 'object' || Array.isArray(a)) {
+          continue;
+        }
+        if (a.available === false) {
+          continue;
+        }
+        const id = String(a.id || '').trim();
+        if (!id) {
+          continue;
+        }
+  const label = String(a.label || id).trim();
+        const desc = String(a.description || '');
+        const recommended = !!a.recommended;
+        const cls = recommended ? 'assistant-action primary' : 'assistant-action secondary';
+        // If params exist, serialize to a JSON string and attach as data attribute
+        let paramAttr = '';
+        try {
+          if (a.params && typeof a.params === 'object') {
+            paramAttr = ` data-action-params="${esc(encodeURIComponent(JSON.stringify(a.params)))}"`;
+          }
+        } catch (e) {
+          paramAttr = '';
+        }
+        // Skip control actions in the always-visible main button row (they can still appear in next steps)
+        if (controlActionIds.has(id)) {
+          continue;
+        }
+  btns.push(`<button type="button" class="${cls}" data-action-id="${esc(id)}" title="${esc(desc)}"${paramAttr}>${esc(label)}</button>`);
+      } catch (e) {
+        console.error('[UI] Error rendering action:', e);
+        try { console.warn('render action failed', e); } catch {}
+      }
+    }
+    }
+    
+    // Temporary: only show suggested actions in the Next Steps section
+    // if (btns.length) {
+    //   parts.push(`<div class="action-buttons" style="display:flex;gap:8px;flex-wrap:wrap">${btns.join('')}</div>`);
+    // }
+    // Next steps block - always show as actionable buttons
+    if (Array.isArray(next_steps) && next_steps.length) {
+      // De-duplicate and add a touch of variety by avoiding the most recent identical action
+      try {
+        next_steps = Array.from(new Set(next_steps || []));
+        if (window.__recentActionId) {
+          next_steps = next_steps.filter((id) => id !== window.__recentActionId);
+        }
+        // If variety is low, inject alternates not already present (aim for 5-6 actions)
+        const pool = ['broaden_docs', 'set_top_k', 'select_doc', 'toggle_reranker', 'exhaustive_search', 'simplify_explanation', 'cite_sources_only', 'followup_questions', 'mindmap_outline', 'compare_sources'];
+        for (const cand of pool) {
+          if (next_steps.length >= 6) break;
+          if (!next_steps.includes(cand)) next_steps.push(cand);
+        }
+      } catch {}
+      const stepBtns = next_steps.map((s, idx) => {
+        const actionId = String(s || '').trim();
+        
+        // Map action IDs to user-friendly labels
+        const actionLabels = {
+          'enable_web': 'Regenerate with Web Search',
+          'upload_docs': 'Upload Documents', 
+          'expand_detail': 'Expand Answer',
+          'generate_formula_sheet': 'Generate Formula Sheet',
+          'broaden_docs': 'Broaden Search',
+          'select_doc': 'Focus on Document',
+          'set_top_k': 'Adjust Search Depth',
+          'toggle_reranker': 'Regenerate with Reranker',
+          'strict_docs_only': 'Regenerate RAG-Only',
+          'exhaustive_search': 'Regenerate Exhaustive Search',
+          'summarize_docs': 'Summarize Documents',
+          'generate_quiz': 'Generate Quiz',
+          'compare_sources': 'Compare Sources',
+          'simplify_explanation': 'Simplify Explanation',
+          'cite_sources_only': 'List Citations',
+          'mindmap_outline': 'Create Mind Map',
+          'followup_questions': 'Suggest Follow-ups',
+          'translate_answer': 'Translate Answer',
+          'debug_reasoning_trace': 'Show Reasoning',
+          'detect_gaps': 'Identify Knowledge Gaps',
+          'recommend_new_docs': 'Recommend Documents'
+        };
+        
+  const label = (actionLabels[actionId] || actionId).trim();
+        let actionParams = null;
+        
+        // Set default parameters for certain actions
+        if (actionId === 'set_top_k') {
+          actionParams = { k: 15 }; // Default to 15 for "more depth"
+        }
+        
+        if (actionId && actionLabels[actionId]) {
+          let paramAttr = '';
+          if (actionParams) {
+            try {
+              paramAttr = ` data-action-params="${esc(encodeURIComponent(JSON.stringify(actionParams)))}"`;
+            } catch (e) {
+              paramAttr = '';
+            }
+          }
+          return `<button type="button" class="assistant-action secondary next-step" data-action-id="${actionId}" title="${esc(label)}"${paramAttr}>${esc(label)}</button>`;
+        } else {
+          // Fallback: treat as text suggestion
+          let shortLabel = actionId;
+          if (actionId.includes(':')) {
+            shortLabel = actionId.split(':')[0].trim();
+          } else if (actionId.length > 50) {
+            shortLabel = actionId.substring(0, 47) + '...';
+          }
+          return `<button type="button" class="assistant-action secondary next-step" data-step-idx="${idx}" title="${esc(actionId)}">${esc(shortLabel)}</button>`;
+        }
+      }).join('');
+      
+  parts.push(`<div class="next-steps" style="margin-top:8px"><strong>Suggested actions:</strong><div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">${stepBtns}</div></div>`);
+    }
+    
+      if (parts.length === 0) return;
+     
+    wrap.innerHTML = parts.join('');
+    lastBot.appendChild(wrap);
+
+    wrap.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button.assistant-action');
+      if (!btn) return;
+      e.preventDefault();
+      
+      const aid = btn.getAttribute('data-action-id');
+      const stepIdx = btn.getAttribute('data-step-idx');
+      
+      if (aid) {
+        // Define which actions should NOT send a user message immediately
+        // Only upload_docs is a pure UI action now; all others regenerate
+        const noImmediateMessageActions = new Set([
+          'upload_docs'
+        ]);
+        
+        if (!noImmediateMessageActions.has(aid)) {
+          try {
+            const chosenText = btn.textContent ? btn.textContent.trim() : aid;
+            if (chosenText) {
+              appendUserMessage(chosenText);
+              // Persist immediately so it's not lost on refresh; mark as pending to complete later
+              try { recordConversationEntry(chosenText, '', '', null); window.__pendingActionQuestion = chosenText; } catch {}
+            }
+          } catch {}
+        }
+        
+        // Special handling for formula sheet - enable formula mode first
+        if (aid === 'generate_formula_sheet') {
+          const formulaCheckbox = document.getElementById('formula-mode');
+          if (formulaCheckbox && !formulaCheckbox.checked) {
+            formulaCheckbox.checked = true;
+            highlightControl(formulaCheckbox.closest('.chat-settings-block'));
+          }
+        }
+        
+        // Parse optional params attached to the button
+        let params = null;
+        try {
+          const raw = btn.getAttribute('data-action-params');
+          if (raw) {
+            try { params = JSON.parse(decodeURIComponent(raw)); } catch (e) { params = null; }
+          }
+        } catch (e) { params = null; }
+        
+        // Confirm if the action requests confirmation
+        if (aid === 'upload_docs') {
+          const ok = confirm('Open the upload dialog to attach documents?');
+          if (!ok) return;
+        }
+        
+        // Disable the button while performing
+        const prevText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Working…';
+        try {
+          await performAction(aid, params);
+        } catch (err) {
+          showError(err && err.message ? err.message : String(err));
+        } finally {
+          try { btn.disabled = false; btn.textContent = prevText; } catch {}
+        }
+      } else if (stepIdx !== null) {
+        // This is a next-step suggestion button (fallback)
+        const stepText = btn.textContent.trim();
+        if (stepText) {
+          // Fill the question input with the suggestion
+          const questionInput = document.getElementById('question');
+          if (questionInput) {
+            questionInput.value = stepText;
+            questionInput.focus();
+            // Auto-resize the textarea
+            questionInput.style.height = 'auto';
+            questionInput.style.height = questionInput.scrollHeight + 'px';
+          }
+        }
+      }
+    });
+  } catch (err) {
+    console.error('[UI] maybeRenderActions encountered an error:', err);
+    console.error('[UI] Error stack:', err.stack);
+    try { console.warn('maybeRenderActions failed', err); } catch {}
+  }
+}
+
+// Helper function to temporarily highlight a control
+function highlightControl(element) {
+  if (!element) return;
+  element.style.transition = 'box-shadow 0.3s ease, background 0.3s ease';
+  element.style.boxShadow = '0 0 20px rgba(107, 92, 255, 0.6)';
+  element.style.background = 'rgba(107, 92, 255, 0.1)';
+  setTimeout(() => {
+    element.style.boxShadow = '';
+    element.style.background = '';
+  }, 2000);
+}
+
+// Add a PDF export button to a bot message containing formula sheet content
+function addPdfExportButton(messageElement, markdown) {
+  if (!messageElement) return;
+  try {
+    const exportDiv = document.createElement('div');
+    exportDiv.style.marginTop = '12px';
+    exportDiv.style.paddingTop = '8px';
+    exportDiv.style.borderTop = '1px solid rgba(0, 0, 0, 0.06)';
+    exportDiv.innerHTML = `
+      <button class="assistant-action primary" style="font-size: 11px !important; padding: 6px 12px !important; height: auto !important;">
+        📄 Export as PDF
+      </button>
+    `;
+    const btn = exportDiv.querySelector('button');
+    if (btn) {
+      btn.addEventListener('click', () => {
+        exportToPdf(messageElement, markdown);
+      });
+    }
+    messageElement.appendChild(exportDiv);
+  } catch (e) {
+    console.error('Failed to add PDF export button:', e);
+  }
+}
+
+// Export bot message content to PDF
+function exportToPdf(messageElement, markdown) {
+  try {
+    // Use browser's print dialog with special styling for PDF
+    const content = messageElement.cloneNode(true);
+    
+    // Remove the export button from the clone
+    const exportBtn = content.querySelector('button');
+    if (exportBtn) exportBtn.parentElement?.remove();
+    
+    // Create a temporary container for printing
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      alert('Please allow popups to export PDF');
+      return;
+    }
+    
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Formula Sheet - Anagnosis</title>
+        <style>
+          @page { margin: 1in; }
+          body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 12pt;
+            line-height: 1.6;
+            color: #1a1a1a;
+            max-width: 100%;
+            margin: 0;
+            padding: 20px;
+          }
+          h1, h2, h3 { page-break-after: avoid; }
+          table { page-break-inside: avoid; }
+          pre, code {
+            background: #f5f5f5;
+            padding: 2px 4px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+          }
+          pre {
+            padding: 12px;
+            overflow-x: auto;
+          }
+          .next-steps, .trace, button { display: none !important; }
+          img { max-width: 100%; height: auto; }
+        </style>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.2/es5/tex-mml-chtml.min.js"></script>
+      </head>
+      <body>
+        ${content.innerHTML}
+      </body>
+      </html>
+    `);
+    
+    printWindow.document.close();
+    
+    // Wait for content to load, then trigger print
+    printWindow.onload = () => {
+      setTimeout(() => {
+        printWindow.print();
+      }, 500);
+    };
+  } catch (e) {
+    console.error('Failed to export PDF:', e);
+    alert('Failed to export PDF. Please try again.');
+  }
+}
+
+// Perform an action by calling /api/ask/action and handling the result (UI actions or re-run answers)
+async function performAction(action_id, params) {
+  // Helper to complete last pending turn or create a new one
+  const updateOrRecord = (q, ansHtml, ansMd) => {
+    try {
+      const last = chatHistory[chatHistory.length - 1];
+      if (last && String(last.q || '') === String(q || '') && !(last.a_markdown || last.a || last.a_html)) {
+        last.a_html = ansHtml || '';
+        last.a_markdown = ansMd || (ansHtml ? stripHTML(ansHtml) : '');
+        last.a = last.a_markdown;
+        if (activeConvId && conversations[activeConvId]) {
+          const conv = conversations[activeConvId];
+          conv.history = [...chatHistory];
+          conv.updatedAt = Date.now();
+          conversations[activeConvId] = conv;
+          saveConversations();
+          renderConversationList();
+        }
+      } else {
+        recordConversationEntry(q, ansHtml || '', ansMd || '');
+      }
+    } catch { recordConversationEntry(q, ansHtml || '', ansMd || ''); }
+  };
+  
+  try {
+    // Show immediate UI feedback: log + progress
+    if (askLog) askLog.textContent = `Working… (${action_id})`;
+    const sendBtn = askForm?.querySelector('.send-btn');
+    if (sendBtn) sendBtn.disabled = true;
+    if (askProgress) askProgress.classList.add('active');
+    const question = (document.getElementById('question')?.value || '').trim() || (chatWindow?.querySelector('.message.user:last-of-type')?.textContent || '');
+    const payload = collectAskPayloadFromUI();
+    payload.action_id = action_id;
+    if (params && typeof params === 'object') payload.action_params = params;
+    payload.question = question;
+    payload.history = chatHistory;
+    const resp = await fetch(`${API_BASE}/ask/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      credentials: 'include',
+    });
+    if (!resp.ok) {
+      const txt = await resp.text();
+      if (askLog) askLog.textContent = `Error: ${txt || 'Action failed'}`;
+      if (sendBtn) sendBtn.disabled = false;
+      if (askProgress) askProgress.classList.remove('active');
+      throw new Error(txt || 'Action failed');
+    }
+    const data = await resp.json();
+  // Record most recent action id for variety filtering
+  try { window.__recentActionId = action_id; } catch {}
+    // If the server returns a job id, switch to polling flow just like ask
+    if (data && data.job_id) {
+      const jobId = data.job_id;
+      try { localStorage.setItem('anag_active_job', jobId); } catch {}
+      const sendBtn = askForm?.querySelector('.send-btn');
+      
+      // Set up cancel handler for action jobs
+      let cancelArmed = false;
+      if (sendBtn) { 
+        sendBtn.disabled = false; 
+        sendBtn.classList.add('is-cancel'); 
+        sendBtn.title = 'Cancel'; 
+        try { sendBtn.setAttribute('type','button'); } catch {} 
+        
+        const cancelActionOnce = async (e) => {
+          if (cancelArmed) return; 
+          cancelArmed = true;
+          e?.preventDefault?.();
+          try { 
+            await fetch(`${API_BASE}/ask/cancel/${jobId}`, { method: 'POST', credentials: 'include' }); 
+          } catch {}
+          // Update UI
+          try {
+            if (askLog) {
+              const prev = String(askLog.textContent || '').trim();
+              askLog.textContent = prev ? (prev + '\nCancelled') : 'Cancelled';
+              try { askLog.scrollTop = askLog.scrollHeight; } catch {}
+            }
+          } catch {}
+          try { if (askProgress) askProgress.classList.remove('active'); } catch {}
+          try { if (sendBtn) { sendBtn.classList.remove('is-cancel'); sendBtn.title = 'Send'; sendBtn.setAttribute('type', 'submit'); } } catch {}
+          try { if (window.__activeActionPoll) { clearInterval(window.__activeActionPoll); window.__activeActionPoll = null; } } catch {}
+          try { localStorage.removeItem('anag_active_job'); } catch {}
+          try {
+            // Persist the action as a turn with an empty answer
+            const qForSave = (window.__pendingActionQuestion || payload.question || question || '').trim();
+            if (qForSave) {
+              recordConversationEntry(qForSave, '', '', null);
+              try { window.__pendingActionQuestion = null; } catch {}
+            }
+          } catch {}
+        };
+        
+        try { sendBtn.addEventListener('click', cancelActionOnce, { once: true }); } catch {}
+      }
+      
+      // Inline poller (simplified from askQuestion)
+      const pollActionJob = async () => {
+        try {
+          const s = await fetch(`${API_BASE}/ask/status/${jobId}`, { credentials: 'include' });
+          if (!s.ok) { throw new Error(`Status ${s.status}`); }
+          const st = await s.json();
+          if (Array.isArray(st.logs) && askLog) { askLog.textContent = st.logs.join('\n'); try { askLog.scrollTop = askLog.scrollHeight; } catch {} }
+          if (st.status === 'done') {
+            if (askProgress) askProgress.classList.remove('active');
+            if (sendBtn) { sendBtn.disabled = false; sendBtn.classList.remove('is-cancel'); sendBtn.title = 'Send'; try { sendBtn.setAttribute('type','submit'); } catch {} }
+            try { localStorage.removeItem('anag_active_job'); } catch {}
+            try { if (window.__activeActionPoll) { clearInterval(window.__activeActionPoll); window.__activeActionPoll = null; } } catch {}
+            
+            // Special handling for followup_questions in job results
+            if (st.followup_questions && Array.isArray(st.followup_questions) && st.followup_questions.length > 0) {
+              const followups = st.followup_questions;
+              const esc = escapeHTML;
+              const followupHTML = `
+                <div class="followup-container" style="display: flex; flex-direction: column; gap: 10px;">
+                  <div style="font-weight: 600; font-size: 1rem; color: #0f172a; margin-bottom: 4px;">💡 Suggested Follow-up Questions</div>
+                  ${followups.map((q, idx) => `
+                    <button type="button" 
+                            class="followup-question-btn" 
+                            data-question="${esc(q)}"
+                            style="
+                              text-align: left;
+                              padding: 12px 16px;
+                              border: 1px solid rgba(79, 70, 229, 0.25);
+                              background: linear-gradient(135deg, rgba(79, 70, 229, 0.08), rgba(129, 140, 248, 0.06));
+                              color: #1e293b;
+                              border-radius: 12px;
+                              cursor: pointer;
+                              transition: all 0.2s ease;
+                              font-size: 0.92rem;
+                              line-height: 1.5;
+                              box-shadow: 0 2px 8px -4px rgba(79, 70, 229, 0.15);
+                            "
+                            onmouseover="this.style.background='linear-gradient(135deg, rgba(79, 70, 229, 0.15), rgba(129, 140, 248, 0.12))'; this.style.transform='translateY(-1px)'; this.style.boxShadow='0 4px 12px -4px rgba(79, 70, 229, 0.25)';"
+                            onmouseout="this.style.background='linear-gradient(135deg, rgba(79, 70, 229, 0.08), rgba(129, 140, 248, 0.06))'; this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 8px -4px rgba(79, 70, 229, 0.15)';"
+                            onclick="this.disabled=true; this.style.opacity='0.6'; document.getElementById('question').value = this.dataset.question; document.getElementById('ask-form').requestSubmit();">
+                      <span style="display: inline-block; margin-right: 8px; opacity: 0.7;">${idx + 1}.</span>
+                      ${esc(q)}
+                    </button>
+                  `).join('')}
+                </div>
+              `;
+              const botMessageEl = appendBotMessage(followupHTML);
+              try {
+                const qForSave = (window.__pendingActionQuestion || payload.question || question || '').trim();
+                updateOrRecord(qForSave, followupHTML, `Follow-up Questions:\n${followups.map((q, i) => `${i+1}. ${q}`).join('\n')}`);
+                try { window.__pendingActionQuestion = null; } catch {}
+              } catch {}
+              return 'done';
+            }
+            
+            // Special handling for quiz_questions in job results
+            if (st.quiz_questions && Array.isArray(st.quiz_questions) && st.quiz_questions.length > 0) {
+              const quizData = st.quiz_questions;
+              const esc = escapeHTML;
+              
+                // Define the quiz handler function globally before rendering HTML
+                window.quizState = window.quizState || {};
+                window.quizState.answered = 0;
+                window.quizState.correct = 0;
+                window.quizState.total = quizData.length;
+                // Regenerate helper
+                window.regenQuiz = async function(count){
+                  try {
+                    let n = Number(count);
+                    if (!Number.isFinite(n)) n = quizData.length || 5;
+                    n = Math.max(1, Math.min(30, Math.round(n)));
+                    // Optional: show a small user message for clarity
+                    appendUserMessage(`Regenerate quiz with ${n} question${n===1?'':'s'}`);
+                    try { recordConversationEntry(`Regenerate quiz (${n})`, '', '', null); } catch {}
+                    await performAction('generate_quiz', { count: n });
+                  } catch (e) {
+                    showError(e && e.message ? e.message : String(e));
+                  }
+                };
+              
+                window.handleQuizAnswer = function(btn, qIdx, optIdx, correctIdx) {
+                  // Get explanation from data attribute
+                  const explanation = btn.getAttribute('data-explanation') || '';
+                
+                  const container = btn.closest('.quiz-question');
+                  const wrap = btn.closest('.quiz-container');
+                  const allBtns = container.querySelectorAll('.quiz-option-btn');
+                  allBtns.forEach(b => b.disabled = true);
+                
+                  const isCorrect = (optIdx === correctIdx);
+                
+                  if (isCorrect) {
+                    btn.style.background = 'rgba(34, 197, 94, 0.15)';
+                    btn.style.borderColor = 'rgba(34, 197, 94, 0.5)';
+                    btn.style.color = '#166534';
+                    btn.classList.add('correct');
+                    window.quizState.correct++;
+                  } else {
+                    btn.style.background = 'rgba(239, 68, 68, 0.15)';
+                    btn.style.borderColor = 'rgba(239, 68, 68, 0.5)';
+                    btn.style.color = '#991b1b';
+                    btn.classList.add('incorrect');
+                  
+                    allBtns[correctIdx].style.background = 'rgba(34, 197, 94, 0.15)';
+                    allBtns[correctIdx].style.borderColor = 'rgba(34, 197, 94, 0.5)';
+                    allBtns[correctIdx].style.color = '#166534';
+                    allBtns[correctIdx].classList.add('correct');
+                  }
+                
+                  const feedback = container.querySelector('.quiz-feedback');
+                  feedback.style.display = 'block';
+                  if (isCorrect) {
+                    feedback.style.background = 'rgba(34, 197, 94, 0.12)';
+                    feedback.style.border = '1px solid rgba(34, 197, 94, 0.3)';
+                    feedback.style.color = '#166534';
+                    feedback.innerHTML = '<strong>✓ Correct!</strong> ' + (explanation || '');
+                  } else {
+                    feedback.style.background = 'rgba(239, 68, 68, 0.12)';
+                    feedback.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+                    feedback.style.color = '#991b1b';
+                    feedback.innerHTML = '<strong>✗ Incorrect.</strong> The correct answer is <strong>' + String.fromCharCode(65 + correctIdx) + '</strong>. ' + (explanation || '');
+                  }
+                
+                  window.quizState.answered++;
+                
+                  // Reveal next question sequentially
+                  try {
+                    const next = wrap?.querySelector(`.quiz-question[data-quiz-idx='${qIdx+1}']`);
+                    if (next && next.style.display === 'none') {
+                      next.style.display = 'block';
+                      next.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                  } catch {}
+
+                  if (window.quizState.answered === window.quizState.total) {
+                    const scoreEl = wrap ? wrap.querySelector('.quiz-score') : document.querySelector('.quiz-score');
+                    const percentage = Math.round((window.quizState.correct / window.quizState.total) * 100);
+                    let emoji = '🎉';
+                    if (percentage < 50) emoji = '📚';
+                    else if (percentage < 80) emoji = '👍';
+                  
+                    scoreEl.innerHTML = emoji + ' You scored <strong>' + window.quizState.correct + '/' + window.quizState.total + '</strong> (' + percentage + '%)';
+                    scoreEl.style.display = 'block';
+                  }
+                };
+              
+              const initialCount = (st.quiz_meta && Number(st.quiz_meta.count)) || quizData.length || 5;
+              const quizHTML = `
+                <div class="quiz-container" style="display: flex; flex-direction: column; gap: 16px;">
+                  <div style="font-weight: 700; font-size: 1.1rem; color: #0f172a; margin-bottom: 2px;">📝 Quiz Time! <span style="font-weight:600; color:#475569">(${initialCount} questions)</span></div>
+                  <div style="font-size:.85rem; color:#64748b; margin-bottom:8px;">Questions unlock one-by-one as you answer.</div>
+                  ${quizData.map((q, qIdx) => `
+                    <div class="quiz-question" data-quiz-idx="${qIdx}" style="${qIdx>0?'display:none;':''}padding: 16px; border: 1px solid rgba(79, 70, 229, 0.2); background: rgba(249, 250, 251, 0.8); border-radius: 12px;">
+                      <div style="font-weight: 600; font-size: 0.95rem; margin-bottom: 12px; color: #1e293b;">
+                        <span style="display: inline-block; width: 28px; height: 28px; border-radius: 50%; background: rgba(79, 70, 229, 0.15); text-align: center; line-height: 28px; margin-right: 8px; font-weight: 700; color: #4f46e5;">${qIdx + 1}</span>
+                        ${esc(q.question || '')}
+                      </div>
+                      <div class="quiz-options" style="display: flex; flex-direction: column; gap: 8px;">
+                        ${(q.options || []).map((opt, optIdx) => {
+                          const escapedExplanation = esc(q.explanation || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                          return `
+                          <button type="button" 
+                                  class="quiz-option-btn" 
+                                  data-quiz-idx="${qIdx}"
+                                  data-option-idx="${optIdx}"
+                                  data-correct="${q.correct || 0}"
+                                  data-explanation="${escapedExplanation}"
+                                  style="
+                                    text-align: left;
+                                    padding: 10px 14px;
+                                    border: 1.5px solid rgba(148, 163, 184, 0.3);
+                                    background: #ffffff;
+                                    color: #1e293b;
+                                    border-radius: 10px;
+                                    cursor: pointer;
+                                    transition: all 0.2s ease;
+                                    font-size: 0.9rem;
+                                    position: relative;
+                                  "
+                                  onmouseover="if(!this.disabled) { this.style.background='rgba(249, 250, 251, 1)'; this.style.borderColor='rgba(79, 70, 229, 0.4)'; }"
+                                  onmouseout="if(!this.disabled && !this.classList.contains('correct') && !this.classList.contains('incorrect')) { this.style.background='#ffffff'; this.style.borderColor='rgba(148, 163, 184, 0.3)'; }"
+                                  onclick="handleQuizAnswer(this, ${qIdx}, ${optIdx}, ${q.correct || 0})">
+                            <span style="display: inline-block; width: 24px; height: 24px; border-radius: 50%; border: 2px solid currentColor; text-align: center; line-height: 20px; margin-right: 10px; font-weight: 600;">${String.fromCharCode(65 + optIdx)}</span>
+                            ${esc(opt)}
+                          </button>
+                        `;
+                        }).join('')}
+                      </div>
+                      <div class="quiz-feedback" style="display: none; margin-top: 12px; padding: 12px; border-radius: 8px; font-size: 0.88rem; line-height: 1.5;"></div>
+                    </div>
+                  `).join('')}
+                  <div class="quiz-score" style="display: none; padding: 16px; background: linear-gradient(135deg, rgba(34, 197, 94, 0.12), rgba(59, 130, 246, 0.12)); border: 1px solid rgba(34, 197, 94, 0.3); border-radius: 12px; text-align: center; font-weight: 600; font-size: 1rem;"></div>
+                  <div class="quiz-regenerate" style="display:flex; align-items:center; gap:10px; justify-content:flex-end; margin-top:4px;">
+                    <label style="display:inline-flex; align-items:center; gap:6px; font-size:.9rem; color:#334155;">
+                      <span>Questions:</span>
+                      <input type="number" class="quiz-count" min="1" max="30" value="${initialCount}" style="width:64px; text-align:center; border:1px solid rgba(148,163,184,0.4); border-radius:8px; padding:4px;" onchange="if(this.value>30)this.value=30;if(this.value<1)this.value=1;" onblur="if(this.value>30)this.value=30;if(this.value<1)this.value=1;" />
+                    </label>
+                    <button type="button" class="assistant-action secondary" onclick="(function(el){ const wrap = el.closest('.quiz-container'); const inp = wrap ? wrap.querySelector('.quiz-count') : null; const n = inp ? inp.value : ${initialCount}; window.regenQuiz(n); })(this)" title="Generate a new quiz with this many questions">Regenerate quiz</button>
+                  </div>
+                </div>
+              `;
+              const botMessageEl = appendBotMessage(quizHTML);
+              try {
+                const qForSave = (window.__pendingActionQuestion || payload.question || question || '').trim();
+                const quizMd = 'Quiz:\n' + quizData.map((q, i) => `${i+1}. ${q.question}\n${(q.options || []).map((o, j) => `   ${String.fromCharCode(65+j)}) ${o}`).join('\n')}\nAnswer: ${String.fromCharCode(65 + (q.correct || 0))}`).join('\n\n');
+                updateOrRecord(qForSave, quizHTML, quizMd);
+                try { window.__pendingActionQuestion = null; } catch {}
+              } catch {}
+              return 'done';
+            }
+            
+            if (st.answer) {
+              const botMessageEl = appendBotMessage(st.answer);
+              try {
+                const qForSave = (window.__pendingActionQuestion || payload.question || question || '').trim();
+                updateOrRecord(qForSave, st.answer || '', st.answer_markdown || '');
+                try { window.__pendingActionQuestion = null; } catch {}
+              } catch {}
+              try { maybeRenderActions(st.actions || [], st.next_steps || [], botMessageEl); } catch {}
+              try { 
+                if (st.trace || st.result?.trace) { 
+                  maybeAppendTrace(st.trace || st.result?.trace, botMessageEl); 
+                } else {
+                  maybeAppendTrace(null, botMessageEl);
+                }
+              } catch {}
+              // Add PDF export button if this was a formula sheet action
+              if (action_id === 'generate_formula_sheet') {
+                addPdfExportButton(botMessageEl, st.answer_markdown || st.answer || '');
+              }
+            }
+            return 'done';
+          }
+          return st.status || 'running';
+        } catch (e) {
+          if (askLog) askLog.textContent = `Error: ${e}`;
+          if (askProgress) askProgress.classList.remove('active');
+          if (sendBtn) sendBtn.disabled = false;
+          try { localStorage.removeItem('anag_active_job'); } catch {}
+          return 'error';
+        }
+      };
+      // kick once and then interval
+      let status = await pollActionJob();
+      if (status !== 'done' && status !== 'error') {
+        const int = setInterval(async () => {
+          const st = await pollActionJob();
+          if (st === 'done' || st === 'error') clearInterval(int);
+        }, 900);
+        // Store interval handle for cancellation
+        window.__activeActionPoll = int;
+      }
+      return;
+    }
+    try {
+      // Write any logs returned by the server into the Ask Log
+      if (Array.isArray(data.logs) && data.logs.length && askLog) {
+        askLog.textContent = data.logs.join('\n');
+        try { askLog.scrollTop = askLog.scrollHeight; } catch {}
+      } else if (data.log && askLog) {
+        askLog.textContent = String(data.log);
+        try { askLog.scrollTop = askLog.scrollHeight; } catch {}
+      }
+    } catch {}
+    
+    // UI hints
+    if (data.ui && data.ui.open_upload) {
+      // Switch to library tab and focus the upload input
+      try { switchTab('library'); } catch {}
+      try { const inp = document.getElementById('upload-input'); if (inp) inp.click(); } catch {}
+      if (sendBtn) sendBtn.disabled = false;
+      if (askProgress) askProgress.classList.remove('active');
+      return;
+    }
+    
+    // Special handling for followup_questions: render as clickable buttons
+    if (data.followup_questions && Array.isArray(data.followup_questions) && data.followup_questions.length > 0) {
+      const followups = data.followup_questions;
+      const esc = escapeHTML;
+      // Create a custom message with interactive buttons
+      const followupHTML = `
+        <div class="followup-container" style="display: flex; flex-direction: column; gap: 10px;">
+          <div style="font-weight: 600; font-size: 1rem; color: #0f172a; margin-bottom: 4px;">💡 Suggested Follow-up Questions</div>
+          ${followups.map((q, idx) => `
+            <button type="button" 
+                    class="followup-question-btn" 
+                    data-question="${esc(q)}"
+                    style="
+                      text-align: left;
+                      padding: 12px 16px;
+                      border: 1px solid rgba(79, 70, 229, 0.25);
+                      background: linear-gradient(135deg, rgba(79, 70, 229, 0.08), rgba(129, 140, 248, 0.06));
+                      color: #1e293b;
+                      border-radius: 12px;
+                      cursor: pointer;
+                      transition: all 0.2s ease;
+                      font-size: 0.92rem;
+                      line-height: 1.5;
+                      box-shadow: 0 2px 8px -4px rgba(79, 70, 229, 0.15);
+                    "
+                    onmouseover="this.style.background='linear-gradient(135deg, rgba(79, 70, 229, 0.15), rgba(129, 140, 248, 0.12))'; this.style.transform='translateY(-1px)'; this.style.boxShadow='0 4px 12px -4px rgba(79, 70, 229, 0.25)';"
+                    onmouseout="this.style.background='linear-gradient(135deg, rgba(79, 70, 229, 0.08), rgba(129, 140, 248, 0.06))'; this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 8px -4px rgba(79, 70, 229, 0.15)';"
+                    onclick="this.disabled=true; this.style.opacity='0.6'; document.getElementById('question').value = this.dataset.question; document.getElementById('ask-form').requestSubmit();">
+              <span style="display: inline-block; margin-right: 8px; opacity: 0.7;">${idx + 1}.</span>
+              ${esc(q)}
+            </button>
+          `).join('')}
+        </div>
+      `;
+      var botMessageEl = appendBotMessage(followupHTML);
+      try {
+        const qForSave = (window.__pendingActionQuestion || payload.question || question || '').trim();
+        updateOrRecord(qForSave, followupHTML, `Follow-up Questions:\n${followups.map((q, i) => `${i+1}. ${q}`).join('\n')}`);
+        try { window.__pendingActionQuestion = null; } catch {}
+      } catch {}
+      if (sendBtn) sendBtn.disabled = false;
+      if (askProgress) askProgress.classList.remove('active');
+      return;
+    }
+    
+    // Special handling for quiz_questions: render as interactive quiz
+    if (data.quiz_questions && Array.isArray(data.quiz_questions) && data.quiz_questions.length > 0) {
+      const quizData = data.quiz_questions;
+      const esc = escapeHTML;
+      
+        // Define the quiz handler function globally before rendering HTML
+        window.quizState = window.quizState || {};
+        window.quizState.answered = 0;
+        window.quizState.correct = 0;
+        window.quizState.total = quizData.length;
+        // Regenerate helper
+        window.regenQuiz = async function(count){
+          try {
+            let n = Number(count);
+            if (!Number.isFinite(n)) n = quizData.length || 5;
+            n = Math.max(1, Math.min(30, Math.round(n)));
+            appendUserMessage(`Regenerate quiz with ${n} question${n===1?'':'s'}`);
+            try { recordConversationEntry(`Regenerate quiz (${n})`, '', '', null); } catch {}
+            await performAction('generate_quiz', { count: n });
+          } catch (e) {
+            showError(e && e.message ? e.message : String(e));
+          }
+        };
+      
+        window.handleQuizAnswer = function(btn, qIdx, optIdx, correctIdx) {
+          // Get explanation from data attribute
+          const explanation = btn.getAttribute('data-explanation') || '';
+        
+          // Prevent multiple answers
+          const container = btn.closest('.quiz-question');
+          const wrap = btn.closest('.quiz-container');
+          const allBtns = container.querySelectorAll('.quiz-option-btn');
+          allBtns.forEach(b => b.disabled = true);
+        
+          const isCorrect = (optIdx === correctIdx);
+        
+          // Style the clicked button
+          if (isCorrect) {
+            btn.style.background = 'rgba(34, 197, 94, 0.15)';
+            btn.style.borderColor = 'rgba(34, 197, 94, 0.5)';
+            btn.style.color = '#166534';
+            btn.classList.add('correct');
+            window.quizState.correct++;
+          } else {
+            btn.style.background = 'rgba(239, 68, 68, 0.15)';
+            btn.style.borderColor = 'rgba(239, 68, 68, 0.5)';
+            btn.style.color = '#991b1b';
+            btn.classList.add('incorrect');
+          
+            // Highlight correct answer
+            allBtns[correctIdx].style.background = 'rgba(34, 197, 94, 0.15)';
+            allBtns[correctIdx].style.borderColor = 'rgba(34, 197, 94, 0.5)';
+            allBtns[correctIdx].style.color = '#166534';
+            allBtns[correctIdx].classList.add('correct');
+          }
+        
+          // Show feedback
+          const feedback = container.querySelector('.quiz-feedback');
+          feedback.style.display = 'block';
+          if (isCorrect) {
+            feedback.style.background = 'rgba(34, 197, 94, 0.12)';
+            feedback.style.border = '1px solid rgba(34, 197, 94, 0.3)';
+            feedback.style.color = '#166534';
+            feedback.innerHTML = '<strong>✓ Correct!</strong> ' + (explanation || '');
+          } else {
+            feedback.style.background = 'rgba(239, 68, 68, 0.12)';
+            feedback.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+            feedback.style.color = '#991b1b';
+            feedback.innerHTML = '<strong>✗ Incorrect.</strong> The correct answer is <strong>' + String.fromCharCode(65 + correctIdx) + '</strong>. ' + (explanation || '');
+          }
+        
+          window.quizState.answered++;
+        
+          // Show final score when all questions answered
+          // Reveal next question sequentially
+          try {
+            const next = wrap?.querySelector(`.quiz-question[data-quiz-idx='${qIdx+1}']`);
+            if (next && next.style.display === 'none') {
+              next.style.display = 'block';
+              next.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+          } catch {}
+
+          if (window.quizState.answered === window.quizState.total) {
+            const scoreEl = wrap ? wrap.querySelector('.quiz-score') : document.querySelector('.quiz-score');
+            const percentage = Math.round((window.quizState.correct / window.quizState.total) * 100);
+            let emoji = '🎉';
+            if (percentage < 50) emoji = '📚';
+            else if (percentage < 80) emoji = '👍';
+          
+            scoreEl.innerHTML = emoji + ' You scored <strong>' + window.quizState.correct + '/' + window.quizState.total + '</strong> (' + percentage + '%)';
+            scoreEl.style.display = 'block';
+          }
+        };
+      
+        const initialCount = (data.quiz_meta && Number(data.quiz_meta.count)) || quizData.length || 5;
+        const quizHTML = `
+        <div class="quiz-container" style="display: flex; flex-direction: column; gap: 16px;">
+          <div style="font-weight: 700; font-size: 1.1rem; color: #0f172a; margin-bottom: 2px;">📝 Quiz Time! <span style="font-weight:600; color:#475569">(${initialCount} questions)</span></div>
+          <div style="font-size:.85rem; color:#64748b; margin-bottom:8px;">Questions unlock one-by-one as you answer.</div>
+          ${quizData.map((q, qIdx) => `
+            <div class="quiz-question" data-quiz-idx="${qIdx}" style="${qIdx>0?'display:none;':''}padding: 16px; border: 1px solid rgba(79, 70, 229, 0.2); background: rgba(249, 250, 251, 0.8); border-radius: 12px;">
+              <div style="font-weight: 600; font-size: 0.95rem; margin-bottom: 12px; color: #1e293b;">
+                <span style="display: inline-block; width: 28px; height: 28px; border-radius: 50%; background: rgba(79, 70, 229, 0.15); text-align: center; line-height: 28px; margin-right: 8px; font-weight: 700; color: #4f46e5;">${qIdx + 1}</span>
+                ${esc(q.question || '')}
+              </div>
+              <div class="quiz-options" style="display: flex; flex-direction: column; gap: 8px;">
+                ${(q.options || []).map((opt, optIdx) => {
+                  const escapedExplanation = esc(q.explanation || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                  return `
+                  <button type="button" 
+                          class="quiz-option-btn" 
+                          data-quiz-idx="${qIdx}"
+                          data-option-idx="${optIdx}"
+                          data-correct="${q.correct || 0}"
+                          data-explanation="${escapedExplanation}"
+                          style="
+                            text-align: left;
+                            padding: 10px 14px;
+                            border: 1.5px solid rgba(148, 163, 184, 0.3);
+                            background: #ffffff;
+                            color: #1e293b;
+                            border-radius: 10px;
+                            cursor: pointer;
+                            transition: all 0.2s ease;
+                            font-size: 0.9rem;
+                            position: relative;
+                          "
+                          onmouseover="if(!this.disabled) { this.style.background='rgba(249, 250, 251, 1)'; this.style.borderColor='rgba(79, 70, 229, 0.4)'; }"
+                          onmouseout="if(!this.disabled && !this.classList.contains('correct') && !this.classList.contains('incorrect')) { this.style.background='#ffffff'; this.style.borderColor='rgba(148, 163, 184, 0.3)'; }"
+                          onclick="handleQuizAnswer(this, ${qIdx}, ${optIdx}, ${q.correct || 0})">
+                    <span style="display: inline-block; width: 24px; height: 24px; border-radius: 50%; border: 2px solid currentColor; text-align: center; line-height: 20px; margin-right: 10px; font-weight: 600;">${String.fromCharCode(65 + optIdx)}</span>
+                    ${esc(opt)}
+                  </button>
+                `;
+                }).join('')}
+              </div>
+              <div class="quiz-feedback" style="display: none; margin-top: 12px; padding: 12px; border-radius: 8px; font-size: 0.88rem; line-height: 1.5;"></div>
+            </div>
+          `).join('')}
+          <div class="quiz-score" style="display: none; padding: 16px; background: linear-gradient(135deg, rgba(34, 197, 94, 0.12), rgba(59, 130, 246, 0.12)); border: 1px solid rgba(34, 197, 94, 0.3); border-radius: 12px; text-align: center; font-weight: 600; font-size: 1rem;"></div>
+          <div class="quiz-regenerate" style="display:flex; align-items:center; gap:10px; justify-content:flex-end; margin-top:4px;">
+            <label style="display:inline-flex; align-items:center; gap:6px; font-size:.9rem; color:#334155;">
+              <span>Questions:</span>
+              <input type="number" class="quiz-count" min="1" max="30" value="${initialCount}" style="width:64px; text-align:center; border:1px solid rgba(148,163,184,0.4); border-radius:8px; padding:4px;" onchange="if(this.value>30)this.value=30;if(this.value<1)this.value=1;" onblur="if(this.value>30)this.value=30;if(this.value<1)this.value=1;" />
+            </label>
+            <button type="button" class="assistant-action secondary" onclick="(function(el){ const wrap = el.closest('.quiz-container'); const inp = wrap ? wrap.querySelector('.quiz-count') : null; const n = inp ? inp.value : ${initialCount}; window.regenQuiz(n); })(this)" title="Generate a new quiz with this many questions">Regenerate quiz</button>
+          </div>
+        </div>
+      `;
+      var botMessageEl = appendBotMessage(quizHTML);
+      try {
+        const qForSave = (window.__pendingActionQuestion || payload.question || question || '').trim();
+        const quizMd = 'Quiz:\n' + quizData.map((q, i) => `${i+1}. ${q.question}\n${(q.options || []).map((o, j) => `   ${String.fromCharCode(65+j)}) ${o}`).join('\n')}\nAnswer: ${String.fromCharCode(65 + (q.correct || 0))}`).join('\n\n');
+        updateOrRecord(qForSave, quizHTML, quizMd);
+        try { window.__pendingActionQuestion = null; } catch {}
+      } catch {}
+      if (sendBtn) sendBtn.disabled = false;
+      if (askProgress) askProgress.classList.remove('active');
+      return;
+    }
+    
+    // If server returned a new answer, append it
+    if (data.answer) {
+      var botMessageEl = appendBotMessage(data.answer);
+      try {
+        const qForSave = (window.__pendingActionQuestion || payload.question || question || '').trim();
+        updateOrRecord(qForSave, data.answer || '', data.answer_markdown || '');
+        try { window.__pendingActionQuestion = null; } catch {}
+      } catch {}
+      // Add PDF export button if this was a formula sheet action
+      if (action_id === 'generate_formula_sheet') {
+        addPdfExportButton(botMessageEl, data.answer_markdown || data.answer || '');
+      }
+    }
+    // If server returned a result with actions, render them
+    const result = data.result || {};
+    try {
+      const actions = Array.isArray(result.actions) ? result.actions : (Array.isArray(data.actions) ? data.actions : []);
+      let next_steps = Array.isArray(result.next_steps) ? result.next_steps : (Array.isArray(data.next_steps) ? data.next_steps : []);
+      // Fallback: ensure next steps always exist (client-side defaults)
+      if (!Array.isArray(next_steps) || next_steps.length === 0) {
+        next_steps = ['expand_detail', 'upload_docs', 'generate_formula_sheet', 'broaden_docs'];
+      }
+      // Prefer rendering on the freshly appended bot message
+      maybeRenderActions(actions || [], next_steps || [], botMessageEl);
+      // Attach trace to this new message if present
+      try {
+        if (data.trace || result.trace) { 
+          maybeAppendTrace(data.trace || result.trace, botMessageEl); 
+        } else { 
+          maybeAppendTrace(null, botMessageEl); 
+        }
+      } catch {}
+    } catch {}
+    // Turn off progress and re-enable send
+    try { if (sendBtn) sendBtn.disabled = false; } catch {}
+    try { if (askProgress) askProgress.classList.remove('active'); } catch {}
+  } catch (err) {
+    try {
+      if (askLog) askLog.textContent = `Error: ${err && err.message ? err.message : String(err)}`;
+      if (askProgress) askProgress.classList.remove('active');
+      const sendBtn = askForm?.querySelector('.send-btn');
+      if (sendBtn) sendBtn.disabled = false;
+    } catch {}
+    throw err;
+  }
 }
 
 function maybeInsertSummaryMessage(summaryHtml) {
@@ -1732,10 +2860,26 @@ async function askQuestion(payload, question) {
         }
         const d = await direct.json();
         if (askLog) { askLog.textContent = d.log || 'Ready.'; try { askLog.scrollTop = askLog.scrollHeight; } catch {} }
+        // Log the response for debugging
+        try { console.log('[UI] Direct ask response:', d); } catch {}
+        try { console.log('[UI] Actions received:', d.actions); } catch {}
+        try { console.log('[UI] Next steps received:', d.next_steps); } catch {}
         if (d.answer) {
-          appendBotMessage(d.answer);
+          const botMessageEl = appendBotMessage(d.answer);
+          // Wait for DOM update before attaching actions
+          setTimeout(() => {
+            try { 
+              maybeRenderActions(d.actions || [], d.next_steps || [], botMessageEl); 
+            } catch (e) {
+              console.error('[UI] Error rendering actions/next_steps:', e);
+            }
+          }, 100);
+          try {
+            if (d.trace) { maybeAppendTrace(d.trace, botMessageEl); }
+            else { maybeAppendTrace(null, botMessageEl); }
+          } catch {}
         }
-        if (d.trace) { maybeAppendTrace(d.trace); }
+        // Trace moved to the freshly appended bot message above
         if (question && !cancelArmed) {
           recordConversationEntry(question, d.answer || '', d.answer_markdown, pendingUserHtml || null);
           pendingUserHtml = null;
@@ -1800,6 +2944,7 @@ async function askQuestion(payload, question) {
       } catch {}
       try { if (sendButtonEl) { sendButtonEl.classList.remove('is-cancel'); sendButtonEl.title = 'Send'; sendButtonEl.setAttribute('type', 'submit'); } } catch {}
       try { if (askPollHandle) { clearInterval(askPollHandle); askPollHandle = null; } } catch {}
+      try { if (window.__activeActionPoll) { clearInterval(window.__activeActionPoll); window.__activeActionPoll = null; } } catch {}
       try { localStorage.removeItem('anag_active_job'); } catch {}
       try { removeTempSpacer(); } catch {}
       try { updateScrollDownBtn(); } catch {}
@@ -1862,10 +3007,27 @@ async function askQuestion(payload, question) {
       if (st.status === 'done') {
         clearInterval(askPollHandle); askPollHandle = null;
         try { updateAskStatusFromLogs([]); } catch {}
+        // Log the full response for debugging
+        try { console.log('[UI] Ask status response:', st); } catch {}
+        try { console.log('[UI] Actions received:', st.actions); } catch {}
+        try { console.log('[UI] Next steps received:', st.next_steps); } catch {}
+        try { console.log('[UI] Next steps is array?', Array.isArray(st.next_steps), 'length:', st.next_steps?.length); } catch {}
         if (st.answer) {
-          appendBotMessage(st.answer);
+          const botMessageEl = appendBotMessage(st.answer);
+          try { 
+            // Actions and next_steps are at the top level of st, not nested in result
+            const actionsToRender = st.actions || [];
+            const nextStepsToRender = st.next_steps || [];
+            maybeRenderActions(actionsToRender, nextStepsToRender, botMessageEl);
+          } catch (e) {
+            console.error('[UI] Error rendering actions/next_steps:', e);
+          }
+          try {
+            if (st.trace) { maybeAppendTrace(st.trace, botMessageEl); }
+            else { maybeAppendTrace(null, botMessageEl); }
+          } catch {}
         }
-        if (st.trace) { maybeAppendTrace(st.trace); }
+        // Trace moved to the freshly appended bot message above
         if (question && !cancelArmed) {
           recordConversationEntry(question, st.answer || '', st.answer_markdown, pendingUserHtml || null);
           pendingUserHtml = null;
@@ -2403,6 +3565,18 @@ function loadConversation(id) {
   conversations[id].history = normalized;
   renderConversationList();
   ensureBottomSentinel();
+  
+  // Render actions on the last bot message if one exists
+  if (lastEl && lastEl.classList && lastEl.classList.contains('bot')) {
+    try {
+      // Provide fallback next steps for the last message
+      const defaultNextSteps = ['expand_detail', 'upload_docs', 'generate_formula_sheet', 'broaden_docs'];
+      maybeRenderActions([], defaultNextSteps, lastEl);
+    } catch (e) {
+      console.error('[UI] Error rendering actions on loaded conversation:', e);
+    }
+  }
+  
   if (lastEl) {
     scrollMessageStart(lastEl);
     requestAnimationFrame(() => scrollMessageStart(lastEl));
@@ -2607,10 +3781,18 @@ function initImageViewerZoom() {
 }
 
 function initDevTools() {
+  // Check if user is a dev by checking if dev panel exists
+  const devSection = document.getElementById('dev');
+  if (!devSection) {
+    // Not a dev user, skip all dev tools initialization
+    return;
+  }
+  
   const statusEl = document.getElementById('dev-status');
   const consoleInput = document.getElementById('dev-console-input');
   const consoleRun = document.getElementById('dev-console-run');
   const consoleOut = document.getElementById('dev-console-output');
+  
   async function callAdmin(path) {
     const url = `${API_BASE}/admin/${path}`;
     try {
