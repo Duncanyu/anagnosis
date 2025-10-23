@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run the API locally without Docker/Compose.
-# Defaults to SQLite unless you explicitly set USE_SQLITE=0 and provide DATABASE_URL.
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 

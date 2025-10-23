@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import pathlib
 import re
+import json
 from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -175,6 +176,522 @@ def _token_overlap(q_text: str, chunk_text: str) -> float:
     return shared / max(1, len(qtoks))
 
 
+def build_actions(ans_text: str, meta: Dict[str, Any], web_enabled: bool, has_openai: bool, only_doc: Optional[str], strict_docs: bool, attach_chunks: Optional[Sequence[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Construct the actions array for UI from answer text and context flags.
+
+    Kept as a module-level function so other modules (routes/UI) can import it.
+    """
+    actions: List[Dict[str, Any]] = []
+    low = (ans_text or "").lower()
+    has_next = bool(re.search(r"next steps", low))
+    word_count = len(re.findall(r"\w+", ans_text or ""))
+    suggest_broaden = bool(meta.get('suggest_broaden')) or bool(only_doc) or bool(strict_docs)
+
+    actions.append({
+        "id": "enable_web",
+        "label": "Regenerate with Web Search",
+        "description": "Re-run with live web search enabled alongside local documents.",
+        "available": (not web_enabled) and has_openai,
+        "recommended": (not web_enabled) and (not has_next or meta.get('not_found', False)),
+        "requires_confirmation": True,
+    })
+
+    actions.append({
+        "id": "broaden_docs",
+        "label": "Broaden to all documents",
+        "description": "Expand the search to every indexed document instead of a single selected document.",
+        "available": bool(only_doc) or bool(strict_docs),
+        "recommended": suggest_broaden,
+        "requires_confirmation": True,
+    })
+
+    actions.append({
+        "id": "upload_docs",
+        "label": "Upload / Attach Documents",
+        "description": "Attach documents or pages relevant to this question so the assistant can cite them directly.",
+        "available": True,
+        "recommended": meta.get('not_found', False) and not (attach_chunks and len(attach_chunks) > 0),
+        "requires_confirmation": True,
+    })
+
+    actions.append({
+        "id": "expand_detail",
+        "label": "Expand Answer Details",
+        "description": "Produce a longer, more detailed answer and include more evidence and explicit next steps.",
+        "available": True,
+        "recommended": (word_count < 200) or (not has_next),
+        "requires_confirmation": True,
+    })
+
+    actions.append({
+        "id": "summarize_docs",
+        "label": "Summarize Documents",
+        "description": "Generate concise summaries of all relevant documents or the current document set.",
+        "available": has_openai,
+        "recommended": False,
+        "requires_confirmation": True,
+    })
+
+    actions.append({
+        "id": "generate_quiz",
+        "label": "Generate Quiz",
+        "description": "Create quiz questions based on the answer content to test understanding.",
+        "available": has_openai,
+        "recommended": False,
+        "requires_confirmation": True,
+    })
+
+    actions.append({
+        "id": "compare_sources",
+        "label": "Compare Sources",
+        "description": "Analyze and compare different perspectives or data from multiple sources.",
+        "available": has_openai,
+        "recommended": False,
+        "requires_confirmation": True,
+    })
+
+    actions.append({
+        "id": "simplify_explanation",
+        "label": "Simplify Explanation",
+        "description": "Rephrase the answer in simpler terms, avoiding jargon and technical language.",
+        "available": has_openai,
+        "recommended": (word_count > 300) and has_openai,
+        "requires_confirmation": True,
+    })
+
+    actions.append({
+        "id": "cite_sources_only",
+        "label": "List Citations",
+        "description": "Extract and list only the sources and citations from the answer.",
+        "available": has_openai,
+        "recommended": False,
+        "requires_confirmation": True,
+    })
+
+    actions.append({
+        "id": "mindmap_outline",
+        "label": "Create Mind Map",
+        "description": "Generate a hierarchical outline or mind map structure of the answer.",
+        "available": has_openai,
+        "recommended": False,
+        "requires_confirmation": True,
+    })
+
+    actions.append({
+        "id": "followup_questions",
+        "label": "Suggest Follow-ups",
+        "description": "Generate relevant follow-up questions to deepen understanding.",
+        "available": has_openai,
+        "recommended": False,
+        "requires_confirmation": True,
+    })
+
+    actions.append({
+        "id": "translate_answer",
+        "label": "Translate Answer",
+        "description": "Translate the answer to another language while preserving technical accuracy.",
+        "available": has_openai,
+        "recommended": False,
+        "requires_confirmation": True,
+    })
+
+    actions.append({
+        "id": "debug_reasoning_trace",
+        "label": "Show Reasoning",
+        "description": "Display detailed reasoning steps and decision-making process.",
+        "available": has_openai,
+        "recommended": False,
+        "requires_confirmation": True,
+    })
+
+    actions.append({
+        "id": "detect_gaps",
+        "label": "Identify Knowledge Gaps",
+        "description": "Analyze what information is missing or incomplete in the current answer.",
+        "available": has_openai,
+        "recommended": (meta.get('not_found', False) or (word_count < 150)) and has_openai,
+        "requires_confirmation": True,
+    })
+
+    actions.append({
+        "id": "recommend_new_docs",
+        "label": "Recommend Documents",
+        "description": "Suggest additional documents or resources to upload for better answers.",
+        "available": has_openai,
+        "recommended": meta.get('not_found', False) and has_openai,
+        "requires_confirmation": True,
+    })
+
+    return actions
+
+
+def extract_next_steps(ans_text: str) -> List[str]:
+    """Extract short next-step strings from an answer text.
+
+    This is a public helper other modules can call.
+    """
+    if not ans_text:
+        return []
+    
+    # Simple approach: look for lines that start with ** and contain a colon
+    lines = ans_text.split('\n')
+    steps = []
+    
+    for line in lines:
+        line = line.strip()
+        if line.startswith('**') and ':' in line:
+            # Extract the text between ** and :, and everything after :
+            parts = line.split(':', 1)
+            if len(parts) == 2:
+                title = parts[0].replace('**', '').strip()
+                desc = parts[1].strip()
+                if title and desc:
+                    steps.append(f"{title}: {desc}")
+    
+    # If no ** patterns found, try the original approach
+    if not steps:
+        txt = ans_text
+        low = txt.lower()
+        
+        # Look for various patterns that indicate next steps
+        patterns = [
+            r"next\s*steps",
+            r"suggested\s*next\s*steps",
+            r"recommended\s*next\s*steps",
+            r"you\s+can",
+            r"you\s+should",
+            r"try\s+",
+            r"consider\s+",
+            r"suggest\s+",
+            r"recommend\s+"
+        ]
+        
+        idx = -1
+        for pattern in patterns:
+            match = re.search(pattern, low)
+            if match:
+                idx = match.start()
+                break
+        
+        if idx != -1:
+            tail = txt[idx:]
+            lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+            
+            # Skip the header line if it matches a pattern
+            if lines and re.search(r"(next\s*steps|suggested|recommended|you\s+can|you\s+should|try|consider|suggest|recommend)", lines[0], re.I):
+                lines = lines[1:]
+            
+            for ln in lines:
+                # Match bullet points
+                m = re.match(r"^[-•*\u2022]\s*(.+)$", ln)
+                if m:
+                    steps.append(m.group(1).strip())
+                    continue
+                # Match numbered lists
+                m = re.match(r"^\d+[\).]\s*(.+)$", ln)
+                if m:
+                    steps.append(m.group(1).strip())
+                    continue
+                # Match text that looks like a step
+                s = ln.strip()
+                if len(s) < 200 and len(s.split()) <= 50:
+                    # Stop if we hit a header or section break
+                    if re.match(r"^#{1,3}\s*", s) or re.match(r"^[A-Z][A-Za-z ]+:$", s):
+                        break
+                    # Only add if it looks like a step (contains action words or is reasonably short)
+                    if (re.search(r"(check|review|clarify|upload|enable|expand|try|consider|suggest)", s.lower()) or 
+                        len(s) < 100):
+                        steps.append(s)
+                if len(steps) >= 8:
+                    break
+    
+    cleaned = [re.sub(r"\s+", " ", s).strip(" \t\n\r\u2028\u2029") for s in steps]
+    return cleaned
+
+
+def generate_next_steps_with_llm(question: str, answer_text: str, trace: Dict[str, Any], meta: Dict[str, Any], *, web_enabled: bool, has_openai: bool, only_doc: Optional[str], strict_docs: bool, attach_chunks: Optional[Sequence[Dict[str, Any]]]) -> List[str]:
+    """Use an LLM to generate contextual next step suggestions based on the question, answer, and available tools.
+    
+    Returns a list of actionable next step suggestions that relate to available tools/actions.
+    """
+    import json
+    try:
+        # Only attempt when an OpenAI key/config is present
+        cfg = load_config() or {}
+        key = cfg.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        if not key:
+            raise RuntimeError("No OpenAI key configured")
+
+        from openai import OpenAI
+        client = OpenAI(api_key=key)
+        model = cfg.get("OPENAI_CHAT_MODEL") or os.environ.get("OPENAI_CHAT_MODEL") or "gpt-4o-mini"
+
+        # Available tools/actions context
+        available_tools = []
+        if not web_enabled and has_openai:
+            available_tools.append("Enable web search to get current information")
+        if only_doc or strict_docs:
+            available_tools.append("Broaden search to include all documents")
+        available_tools.extend([
+            "Upload more documents for better context",
+            "Expand the answer with more detailed information",
+            "Generate a formula sheet if this is a technical topic",
+            "Focus search on a specific document",
+            "Adjust the search depth (top-k parameter)",
+            "Toggle document reranking for better relevance",
+            "Switch to RAG-only mode for document-focused search",
+            "Perform an exhaustive search across all sources"
+        ])
+
+        # Build context for the LLM
+        context = {
+            "question": question,
+            "answer_snippet": (answer_text or "")[:2000],  # Truncate for token limits
+            "available_tools": available_tools,
+            "current_settings": {
+                "web_enabled": web_enabled,
+                "only_doc": only_doc,
+                "strict_docs": strict_docs,
+                "has_attachments": bool(attach_chunks)
+            }
+        }
+
+        # Available actions that can be executed
+        available_actions = [
+            {"id": "enable_web", "label": "Regenerate with Web Search", "description": "Re-run with live web search enabled"},
+            {"id": "upload_docs", "label": "Upload Documents", "description": "Upload additional documents for better context"},
+            {"id": "expand_detail", "label": "Expand Answer", "description": "Get a more detailed answer with more evidence"},
+            {"id": "generate_formula_sheet", "label": "Generate Formula Sheet", "description": "Create a concise formula sheet"},
+            {"id": "broaden_docs", "label": "Broaden Search", "description": "Search across all documents"},
+            {"id": "select_doc", "label": "Focus on Document", "description": "Search within a specific document"},
+            {"id": "set_top_k", "label": "Adjust Search Depth", "description": "Change the number of documents to search"},
+            {"id": "toggle_reranker", "label": "Regenerate with Reranker", "description": "Re-run with document reranking enabled"},
+            {"id": "strict_docs_only", "label": "Regenerate RAG-Only", "description": "Search only within uploaded documents"},
+            {"id": "exhaustive_search", "label": "Regenerate Exhaustive", "description": "Perform a more thorough search"},
+            {"id": "summarize_docs", "label": "Summarize Documents", "description": "Generate concise summaries of relevant documents"},
+            {"id": "generate_quiz", "label": "Generate Quiz", "description": "Create quiz questions to test understanding"},
+            {"id": "compare_sources", "label": "Compare Sources", "description": "Analyze different perspectives from multiple sources"},
+            {"id": "simplify_explanation", "label": "Simplify Explanation", "description": "Rephrase in simpler terms without jargon"},
+            {"id": "cite_sources_only", "label": "List Citations", "description": "Extract and list only the sources and citations"},
+            {"id": "mindmap_outline", "label": "Create Mind Map", "description": "Generate hierarchical outline or mind map structure"},
+            {"id": "followup_questions", "label": "Suggest Follow-ups", "description": "Generate relevant follow-up questions"},
+            {"id": "translate_answer", "label": "Translate Answer", "description": "Translate answer to another language"},
+            {"id": "debug_reasoning_trace", "label": "Show Reasoning", "description": "Display detailed reasoning steps and process"},
+            {"id": "detect_gaps", "label": "Identify Knowledge Gaps", "description": "Analyze missing or incomplete information"},
+            {"id": "recommend_new_docs", "label": "Recommend Documents", "description": "Suggest additional documents to upload"}
+        ]
+
+        action_list = [action['id'] for action in available_actions]
+        system_prompt = (
+            "You are an AI assistant that suggests relevant next steps for users based on their question and the current answer. "
+            "You MUST select 3-5 action IDs from the list below and return them as a JSON array. "
+            "Return ONLY a valid JSON array of action IDs, with no other text, explanation, or markdown formatting. "
+            "Example: [\"enable_web\", \"upload_docs\", \"expand_detail\"]\n\n"
+            f"AVAILABLE ACTION IDS (choose 3-5 from this list):\n{json.dumps(action_list, indent=2)}"
+        )
+        
+        print(f"[DEBUG] Next steps system prompt: {system_prompt}")
+
+        user_prompt = (
+            f"Based on this question and answer, suggest relevant next steps:\n\n"
+            f"Question: {question}\n\n"
+            f"Answer: {answer_text[:1000]}...\n\n"
+            f"Available tools: {', '.join(available_tools[:5])}\n\n"
+            f"Generate 3-5 specific next step suggestions as a JSON array."
+        )
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.3,
+            max_tokens=300
+        )
+
+        raw_response = (response.choices[0].message.content or "").strip()
+        print(f"[DEBUG] LLM raw response for next_steps: {raw_response}")
+        
+        # Parse JSON response
+        try:
+            # Clean the response first - remove markdown code blocks
+            cleaned_response = raw_response.strip()
+            if cleaned_response.startswith('```json'):
+                cleaned_response = cleaned_response[7:]  # Remove ```json
+            if cleaned_response.endswith('```'):
+                cleaned_response = cleaned_response[:-3]  # Remove ```
+            cleaned_response = cleaned_response.strip()
+            
+            next_steps = json.loads(cleaned_response)
+            if isinstance(next_steps, list):
+                # Validate that these are valid action IDs
+                valid_action_ids = {action['id'] for action in available_actions}
+                cleaned_steps = []
+                for step in next_steps:
+                    if isinstance(step, str) and step.strip():
+                        cleaned = step.strip().strip('"').strip("'")  # Remove quotes
+                        # Drop any clarifying variants that might slip through (e.g., "clarify_answer")
+                        if cleaned.lower().startswith('clarify_'):
+                            print(f"[DEBUG] Filtering out clarifying variant: {cleaned}")
+                            continue
+                        if cleaned in valid_action_ids:
+                            cleaned_steps.append(cleaned)
+                        else:
+                            print(f"[DEBUG] Skipping invalid action ID: {cleaned}")
+                print(f"[DEBUG] Parsed next_steps: {cleaned_steps}")
+                return cleaned_steps[:5]  # Limit to 5 suggestions
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback: extract from the raw response if JSON parsing fails
+        lines = [line.strip() for line in raw_response.split('\n') if line.strip()]
+        fallback_steps = []
+        for line in lines:
+            # Skip markdown code blocks
+            if line.startswith('```'):
+                continue
+            # Remove common prefixes and clean up
+            cleaned = re.sub(r'^[-*•\d+\.\s]*', '', line).strip()
+            # Remove quotes and commas from malformed JSON
+            cleaned = cleaned.strip('"').strip("'").strip(',').strip()
+            if cleaned and len(cleaned) > 5 and len(cleaned) < 100:
+                # Filter out any clarifying themed suggestions
+                if 'clarify' in cleaned.lower():
+                    continue
+                fallback_steps.append(cleaned)
+        return fallback_steps[:5]
+
+    except Exception as e:
+        # Fallback to regex-based extraction if LLM fails
+        steps = extract_next_steps(answer_text)
+        # If still no steps, provide some default action IDs
+        if not steps:
+            steps = [
+                "upload_docs",
+                "enable_web",
+                "expand_detail"
+            ]
+        return steps
+
+
+def generate_actions_with_llm(question: str, answer_text: str, trace: Dict[str, Any], meta: Dict[str, Any], *, web_enabled: bool, has_openai: bool, only_doc: Optional[str], strict_docs: bool, attach_chunks: Optional[Sequence[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Use an LLM to generate a JSON array of actions given question, answer, and context.
+
+    Falls back to build_actions(...) on any error or when no OpenAI key is present.
+    """
+    try:
+        # Only attempt when an OpenAI key/config is present
+        cfg = load_config() or {}
+        key = cfg.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        if not key:
+            raise RuntimeError("No OpenAI key configured")
+
+        from openai import OpenAI
+        client = OpenAI(api_key=key)
+        model = cfg.get("OPENAI_CHAT_MODEL") or os.environ.get("OPENAI_CHAT_MODEL") or "gpt-4o-mini"
+
+        # Enhanced canonical actions we support — the LLM may select from these or suggest params
+        canonical = [
+            {"id": "enable_web", "label": "Enable Web Search", "description": "Run live Web search alongside local documents."},
+            {"id": "broaden_docs", "label": "Broaden to all documents", "description": "Search across all indexed documents."},
+            {"id": "upload_docs", "label": "Upload / Attach Documents", "description": "Attach documents/pages for more context."},
+            {"id": "expand_detail", "label": "Expand Answer Details", "description": "Produce a longer, more detailed answer and include more evidence."},
+            {"id": "generate_formula_sheet", "label": "Generate Formula Sheet", "description": "Create a concise list of formulas relevant to the question."},
+            {"id": "select_doc", "label": "Focus on Specific Document", "description": "Search within a specific document for more targeted results."},
+            {"id": "set_top_k", "label": "Adjust Search Depth", "description": "Change the number of documents to search through."},
+            {"id": "toggle_reranker", "label": "Toggle Reranker", "description": "Enable/disable document reranking for better relevance."},
+            {"id": "strict_docs_only", "label": "RAG Only Mode", "description": "Search only within uploaded documents, no web search."},
+            {"id": "exhaustive_search", "label": "Exhaustive Search", "description": "Perform a more thorough search across all sources."},
+        ]
+
+        avail_map = {
+            "enable_web": (not web_enabled) and has_openai,
+            "broaden_docs": bool(only_doc) or bool(strict_docs),
+            "upload_docs": True,
+            "expand_detail": True,
+            "generate_formula_sheet": True,
+            "select_doc": True,
+            "set_top_k": True,
+            "toggle_reranker": True,
+            "strict_docs_only": not strict_docs,
+            "exhaustive_search": True,
+        }
+
+        safe_trace = {k: trace.get(k) for k in ("retrieval", "selected_context", "web_sources") if trace and trace.get(k) is not None}
+        payload = {
+            "question": question,
+            "answer_snippet": (answer_text or "")[:4000],
+            "trace": safe_trace,
+            "meta": meta or {},
+            "canonical_actions": canonical,
+            "availability": avail_map,
+        }
+
+        system = (
+            "You are an assistant that outputs a strict JSON array of suggested UI actions. "
+            "Each action must be a JSON object with keys: id, label, description, available (bool), recommended (bool), params (object or null), requires_confirmation (bool). "
+            "Only use ids from the provided canonical_actions unless an explicit param mapping is provided. "
+            "If there are no reasonable actions, return an empty array: [] and nothing else."
+        )
+        user_msg = (
+            "Given the user question, the assistant's answer, and retrieval trace/context, return a JSON array of suggested actions. "
+            "Only output valid JSON. Do not include any explanatory text.\n\n"
+            f"Context payload:\n{json.dumps(payload, default=str)[:2500]}"
+        )
+
+        msg = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
+            temperature=0.0,
+            max_tokens=512,
+        )
+        raw = (msg.choices[0].message.content or "").strip()
+        import json as _json
+        parsed = _json.loads(raw)
+        if not isinstance(parsed, list):
+            raise ValueError("LLM did not return a list")
+
+        # Validate and normalize actions
+        validated: List[Dict[str, Any]] = []
+        allowed_ids = {c["id"] for c in canonical}
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            aid = str(item.get("id") or "").strip()
+            if not aid:
+                continue
+            if aid not in allowed_ids:
+                # ignore unknown ids for safety
+                continue
+            label = str(item.get("label") or next((c["label"] for c in canonical if c["id"] == aid), aid))
+            desc = str(item.get("description") or next((c["description"] for c in canonical if c["id"] == aid), ""))
+            available = bool(item.get("available")) if ("available" in item) else bool(avail_map.get(aid, False))
+            recommended = bool(item.get("recommended")) if ("recommended" in item) else False
+            params = item.get("params") if isinstance(item.get("params"), dict) else None
+            requires_confirmation = bool(item.get("requires_confirmation")) if ("requires_confirmation" in item) else True
+            validated.append({
+                "id": aid,
+                "label": label,
+                "description": desc,
+                "available": available,
+                "recommended": recommended,
+                "params": params,
+                "requires_confirmation": requires_confirmation,
+            })
+
+        # Ensure at least one action is present; otherwise fallback to heuristics
+        if not validated:
+            return build_actions(answer_text, meta, web_enabled=web_enabled, has_openai=has_openai, only_doc=only_doc, strict_docs=strict_docs, attach_chunks=attach_chunks)
+        return validated
+    except Exception:
+        # Fallback to heuristic builder
+        try:
+            return build_actions(answer_text, meta, web_enabled=web_enabled, has_openai=has_openai, only_doc=only_doc, strict_docs=strict_docs, attach_chunks=attach_chunks)
+        except Exception:
+            return []
+
+
 def answer_question(
     question: str,
     *,
@@ -201,7 +718,7 @@ def answer_question(
 
     # Build formatting prefix conservatively — never mention LaTeX or Markdown in the answer.
     plain_prefix = (
-        "Answer clearly and concisely in plain text. "
+        "Answer clearly and professionally in plain text. "
         "Do not discuss formatting, Markdown, or LaTeX. "
         "Preserve citations as plain text when applicable.\n"
     )
@@ -213,9 +730,54 @@ def answer_question(
             "<label/meaning> — <formula> [FileName.pdf p.N] — <1–2 sentence explanation>. "
             "Put the citation AFTER the formula. Keep explanations concise and factual.\n\n"
         )
+    # Strong guidance: prefer detailed, evidence-based answers
+    # NOTE: We generate next steps separately using a dedicated LLM call, so we don't want them in the answer
+    fmt_prefix += (
+        "Prioritize a thorough, evidence-backed answer. Begin with a one-line summary, then provide detailed supporting sections or bullets. "
+        "Aim for ~250–600 words unless the user asked for brevity. DO NOT include a 'Next steps' section - that will be generated separately.\n\n"
+    )
     fmt_q = fmt_prefix + question
 
     history = list(history or [])
+
+    # Local helper to ensure any early returns include actions and next_steps
+    def _wrap_out(out_obj: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            meta_local = out_obj.get('meta') if isinstance(out_obj.get('meta'), dict) else {}
+        except Exception:
+            meta_local = {}
+        answer_text_local = out_obj.get('answer') or ''
+        try:
+            heur = build_actions(answer_text_local, meta_local, web_enabled=web_enabled, has_openai=has_openai, only_doc=only_doc, strict_docs=bool(strict_docs), attach_chunks=attach_chunks)
+        except Exception:
+            heur = []
+        final = heur
+        try:
+            if has_openai:
+                try:
+                    llm_a = generate_actions_with_llm(_orig_user_q or question, answer_text_local, {}, meta_local, web_enabled=web_enabled, has_openai=has_openai, only_doc=only_doc, strict_docs=bool(strict_docs), attach_chunks=attach_chunks)
+                    if isinstance(llm_a, list) and llm_a:
+                        # merge
+                        m = {a.get('id'): dict(a) for a in heur}
+                        for a in llm_a:
+                            aid = a.get('id')
+                            if not aid:
+                                continue
+                            if aid in m:
+                                m[aid].update({k: v for k, v in a.items() if v is not None})
+                            else:
+                                m[aid] = dict(a)
+                        final = list(m.values())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        out_obj['actions'] = final or []
+        try:
+            out_obj['next_steps'] = extract_next_steps(answer_text_local)
+        except Exception:
+            out_obj['next_steps'] = []
+        return out_obj
     q_lower = (question or "").strip().lower()
     os.environ["ASK_FORMULA_MODE"] = "true" if formula_mode else "false"
     if history:
@@ -223,23 +785,115 @@ def answer_question(
         if re.search(r"what\s+(?:was|is)\s+(?:my|the)\s+(?:last|previous)\s+question", q_lower):
             prev_q = last.get("q") or "(unknown)"
             text = f"Your previous question was:\n\n> {prev_q}"
-            return {"answer": text, "citations": [], "quotes": []}
+            return _wrap_out({"answer": text, "citations": [], "quotes": []})
         if re.search(r"what\s+(?:was|is)\s+(?:your|the)\s+(?:last|previous)\s+answer", q_lower) or re.search(
             r"repeat\s+your\s+(?:last|previous)\s+answer", q_lower
         ):
             prev_a = last.get("a") or "(no recent answer recorded)"
             text = "Here is my previous answer:\n\n" + prev_a
-            return {"answer": text, "citations": [], "quotes": []}
-
-    # Simple retrieval augmentation: if the last turn has a question but no answer
-    # (e.g., user cancelled), include it to provide context for pronouns like "his/it".
+            return _wrap_out({"answer": text, "citations": [], "quotes": []})
     try:
-        if history:
-            _last = history[-1]
-            prev_q = (_last.get("q") or "").strip()
-            prev_a = (_last.get("a") or "").strip()
-            if prev_q and not prev_a:
-                question = f"{prev_q}\nFollow-up: {_orig_user_q}"
+        q_pronoun_rx = re.compile(r"\b(it|they|them|that|this|these|those|he|she|him|her|its)\b", re.I)
+        q_has_pronoun = bool(q_pronoun_rx.search(_orig_user_q))
+
+        def _extract_referent_from_history(hist):
+            if not hist:
+                return None
+            cand_scores = {}
+            fname_rx = re.compile(r"([\w\- ]+\.(?:pdf|docx|pptx|txt))", re.I)
+            cap_rx = re.compile(r"\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})*)\b")
+            for turn in hist[-6:]:
+                for fld in (turn.get("q"), turn.get("a")):
+                    if not fld:
+                        continue
+                    # filenames
+                    for m in fname_rx.findall(fld):
+                        k = m.strip()
+                        cand_scores[k] = cand_scores.get(k, 0) + 3
+                    # capitalized name phrases
+                    for m in cap_rx.findall(fld):
+                        # filter out single common words like 'The'
+                        if len(m.split()) >= 1:
+                            k = m.strip()
+                            cand_scores[k] = cand_scores.get(k, 0) + 1
+                    # long tokens (likely topics)
+                    toks = re.findall(r"[A-Za-z0-9_]{6,}", fld)
+                    for t in toks:
+                        cand_scores[t] = cand_scores.get(t, 0) + 0.5
+            if not cand_scores:
+                return None
+            # Prefer filenames and multi-word capitalized phrases, then reasonable single-word names
+            sorted_cands = sorted(cand_scores.items(), key=lambda kv: -kv[1])
+            stop_words = {"the","this","that","it","what","how","why","when","where","who"}
+            # Build an anchor string from the original user phrasing and the last user question
+            try:
+                anchor = "".join([_orig_user_q or "", " ", (hist[-1].get("q") or "") if hist else ""]).lower()
+            except Exception:
+                anchor = (_orig_user_q or "").lower()
+            anchor_matches = []
+            verb_stop = {"included","learned","learn","attended","did","do","was","is","are","have","has","included"}
+            for cand, _ in sorted_cands:
+                c = cand.strip()
+                if not c:
+                    continue
+                low = c.lower()
+                # Whole-word match in anchor (prefer these but filter verbs)
+                try:
+                    if re.search(r"\b" + re.escape(low) + r"\b", anchor) and low not in stop_words:
+                        anchor_matches.append(c)
+                        continue
+                except Exception:
+                    pass
+                if low in stop_words:
+                    continue
+                # Accept filenames immediately
+                if "." in c and any(c.lower().endswith(ext) for ext in (".pdf",".docx",".pptx",".txt")):
+                    return c
+                # Accept multi-word capitalized phrases (likely proper names or titles)
+                if " " in c and len(c.split()) >= 2:
+                    return c
+                # Accept single capitalized words that look like names (length >=4)
+                if c[0].isupper() and len(c) >= 4 and c.isalpha():
+                    return c
+                # Accept longer tokens (topic-like)
+                if len(c) >= 6 and re.match(r"^[A-Za-z0-9_\-]+$", c):
+                    return c
+            # Choose best anchor match if available (prefer longer tokens)
+            if anchor_matches:
+                # filter out obvious verbs
+                filtered = [a for a in anchor_matches if a.lower() not in verb_stop]
+                candidates = filtered if filtered else anchor_matches
+                candidates.sort(key=lambda s: -len(s))
+                return candidates[0]
+            return None
+
+        if history and q_has_pronoun:
+            # Build a short context from the last up to 3 turns (most recent last)
+            parts = []
+            for turn in history[-3:]:
+                pq = (turn.get("q") or "").strip()
+                pa = (turn.get("a") or "").strip()
+                if pq:
+                    parts.append(f"Prev question: {pq}")
+                if pa:
+                    parts.append(f"Prev answer: {pa}")
+            # Try to surface a referent label (filename, topic, or name) to help retrieval
+            ref = _extract_referent_from_history(history)
+            if ref:
+                parts.append(f"Referent: {ref}")
+            if parts:
+                prefix = "\n".join(parts)
+                # Use the original user phrasing as the follow-up to preserve intent
+                question = f"{prefix}\nFollow-up: {_orig_user_q}"
+        else:
+            # If no pronoun detected, keep previous lightweight behavior: if last
+            # turn had a question but no answer (e.g., cancelled), include it.
+            if history:
+                _last = history[-1]
+                prev_q = (_last.get("q") or "").strip()
+                prev_a = (_last.get("a") or "").strip()
+                if prev_q and not prev_a:
+                    question = f"{prev_q}\nFollow-up: {_orig_user_q}"
     except Exception:
         pass
 
@@ -421,8 +1075,12 @@ def answer_question(
             x["_score"] = float(sc)
             rag_chunks.append(x)
         if not web_enabled and not hits:
-            _emit_pct(progress_pct, 100)
-            return {"answer": "**No local results. Try web search.**", "citations": [], "quotes": []}
+            # If there are attached chunks or memory chunks, continue using them as
+            # context instead of failing immediately. Only return a no-results
+            # message when there truly is no context to answer from.
+            if not (attach_chunks or mem_chunks):
+                _emit_pct(progress_pct, 100)
+                return _wrap_out({"answer": "**No local results. Try web search.**", "citations": [], "quotes": []})
     else:
         _emit(progress, "Skipping local RAG (lenient gate). Using web results.")
         if web_enabled and not web_chunks:
@@ -525,9 +1183,9 @@ def answer_question(
                 if not (numeric_ok and coverage_ok and support_ok):
                     _emit(progress, f"Strict guard: rag={rag_scores[0] if rag_scores else 'n/a'} ov={max_overlap:.2f} kw={len(covered)} sup={support_chunks} (LLM n/a)")
                     _emit_pct(progress_pct, 100)
-                    return {"answer": "**I couldn't find relevant information in your documents.**", "citations": [], "quotes": []}
+                    return _wrap_out({"answer": "**I couldn't find relevant information in your documents.**", "citations": [], "quotes": []})
             elif decided is False:
-                _emit(progress, f"Strict guard: LLM veto — score={llm_score if llm_score is not None else 'n/a'} label={llm_label or 'n/a'}")
+                _emit(progress, f"Strict guard: LLM veto  score={llm_score if llm_score is not None else 'n/a'} label={llm_label or 'n/a'}")
                 _emit_pct(progress_pct, 100)
                 msg = (
                     "**No directly relevant passage found.**\n\n"
@@ -535,7 +1193,7 @@ def answer_question(
                     "- Enable Web search\n"
                     "- Clarify or upload relevant pages"
                 )
-                return {"answer": msg, "citations": [], "quotes": []}
+                return _wrap_out({"answer": msg, "citations": [], "quotes": []})
             else:
                 _emit(progress, f"Strict guard: LLM pass — score={llm_score if llm_score is not None else 'n/a'} label={llm_label or 'n/a'}")
         except Exception:
@@ -549,7 +1207,7 @@ def answer_question(
                     "- Enable Web search\n"
                     "- Clarify or upload relevant pages"
                 )
-                return {"answer": msg, "citations": [], "quotes": []}
+                return _wrap_out({"answer": msg, "citations": [], "quotes": []})
     elif web_enabled and web_chunks:
         if include_rag and rag_chunks:
             top_chunks = list(web_chunks) + rag_chunks
@@ -771,7 +1429,6 @@ def answer_question(
 
     _emit_pct(progress_pct, 100)
 
-    # Post-process: ensure not-found responses are clearly formatted in Markdown
     try:
         if isinstance(out, dict):
             ans = (out.get("answer") or "").strip()
@@ -785,7 +1442,6 @@ def answer_question(
                     "- Enable Web search\n"
                     "- Clarify or upload relevant pages"
                 )
-                # If the question invites comparative analysis, add a short general section
                 try:
                     ql = (question or "").lower()
                     if any(k in ql for k in ("strength", "weakness", "compare", "versus", "vs ", "trade-off", "tradeoff")):
@@ -796,7 +1452,6 @@ def answer_question(
     except Exception:
         pass
 
-    # Lightweight retrieval trace for UI introspection
     try:
         def _brief(c: Dict[str, Any]) -> Dict[str, Any]:
             try:
@@ -825,7 +1480,6 @@ def answer_question(
                     viewer = base.exists() and str(base.suffix or '').lower() == '.pdf'
             except Exception:
                 viewer = False
-            # Provide a short "needle" text to locate on the page for highlights
             needle = (txt or "").strip().replace("\n", " ")[:160]
             return {
                 "doc": doc,
@@ -967,6 +1621,116 @@ def answer_question(
         except Exception:
             pass
 
-    if isinstance(out, dict):
-        return out
-    return {"answer": str(out), "citations": [], "quotes": []}
+    # Attach module-level actions and next-step extraction. Merge LLM-generated
+    # actions (when available) with heuristic actions so the UI always has
+    # something to render. Also attach a `next_steps` array extracted from
+    # the answer text.
+    try:
+        meta = out.get('meta') if isinstance(out.get('meta'), dict) else {}
+        llm_actions: List[Dict[str, Any]] = []
+        heur_actions: List[Dict[str, Any]] = []
+        answer_text = out.get('answer') if isinstance(out, dict) else str(out)
+        try:
+            heur_actions = build_actions(answer_text or '', meta, web_enabled=web_enabled, has_openai=has_openai, only_doc=only_doc, strict_docs=bool(strict_docs), attach_chunks=attach_chunks)
+        except Exception:
+            heur_actions = []
+
+        if has_openai:
+            try:
+                llm_actions = generate_actions_with_llm(_orig_user_q or question, answer_text or '', trace or {}, meta or {}, web_enabled=web_enabled, has_openai=has_openai, only_doc=only_doc, strict_docs=bool(strict_docs), attach_chunks=attach_chunks)
+                if not isinstance(llm_actions, list):
+                    llm_actions = []
+            except Exception:
+                llm_actions = []
+
+        # Merge heuristics and LLM picks. Prefer LLM-specified fields where
+        # present (label/description/recommended/available/params).
+        merged: Dict[str, Dict[str, Any]] = {}
+        for a in heur_actions or []:
+            try:
+                merged[a.get('id')] = dict(a)
+            except Exception:
+                continue
+        for a in llm_actions or []:
+            try:
+                aid = a.get('id')
+                if not aid:
+                    continue
+                if aid in merged:
+                    # overwrite/augment with LLM-provided values
+                    merged[aid].update({k: v for k, v in a.items() if v is not None})
+                else:
+                    merged[aid] = dict(a)
+            except Exception:
+                continue
+
+        final_actions = list(merged.values())
+        if not final_actions:
+            final_actions = heur_actions or []
+        if isinstance(out, dict):
+            # Always assign to ensure we don't leave a None value in place.
+            out['actions'] = final_actions
+        else:
+            # For non-dict outputs, build a minimal dict to return with actions
+            out = {"answer": str(out), "citations": [], "quotes": [], "actions": final_actions}
+    except Exception:
+        # Last-resort: ensure actions key exists
+        try:
+            if isinstance(out, dict):
+                out.setdefault('actions', [])
+            else:
+                out = {"answer": str(out), "citations": [], "quotes": [], "actions": []}
+        except Exception:
+            out = {"answer": str(out), "citations": [], "quotes": [], "actions": []}
+
+    # Ensure next_steps array is attached for UI convenience
+    try:
+        answer_text = out.get('answer') if isinstance(out, dict) else str(out)
+        # Try LLM-based next steps generation first, fallback to regex extraction
+        ns = []
+        if has_openai:
+            try:
+                ns = generate_next_steps_with_llm(_orig_user_q or question, answer_text or '', web_enabled=web_enabled, has_openai=has_openai, only_doc=only_doc, strict_docs=bool(strict_docs), attach_chunks=attach_chunks, trace=trace or {}, meta=meta or {})
+                print(f"[DEBUG] LLM generated next_steps: {ns}")
+            except Exception as e:
+                print(f"[DEBUG] LLM next_steps failed: {e}")
+                ns = extract_next_steps(answer_text or '')
+        else:
+            ns = extract_next_steps(answer_text or '')
+            print(f"[DEBUG] Regex extracted next_steps: {ns}")
+        
+        # Ensure we always have some next steps (75-80% target)
+        if not ns or len(ns) < 2:
+            print(f"[DEBUG] Not enough next_steps ({len(ns)}), adding defaults")
+            # Generate default action IDs based on context
+            default_actions = []
+            if not web_enabled and has_openai:
+                default_actions.append("enable_web")
+            if only_doc or strict_docs:
+                default_actions.append("broaden_docs")
+            if not attach_chunks:
+                default_actions.append("upload_docs")
+            default_actions.extend([
+                "expand_detail",
+                "generate_formula_sheet"
+            ])
+            print(f"[DEBUG] Default actions to consider: {default_actions}")
+            # Merge with existing steps, avoiding duplicates
+            for action in default_actions:
+                if action not in ns:
+                    ns.append(action)
+                    if len(ns) >= 4:  # Limit to 4 steps max
+                        break
+        
+        print(f"[DEBUG] Final next_steps to be added to result: {ns}")
+        if isinstance(out, dict):
+            out['next_steps'] = ns
+    except Exception as e:
+        print(f"[DEBUG] Exception in next_steps generation: {e}")
+        if isinstance(out, dict):
+            # Provide fallback next steps even on error
+            fallback_steps = ["enable_web", "upload_docs", "expand_detail", "generate_formula_sheet"]
+            out['next_steps'] = fallback_steps
+            print(f"[DEBUG] Using fallback next_steps: {fallback_steps}")
+
+    return out

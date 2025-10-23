@@ -71,13 +71,13 @@ def _template_body(inline_cite: bool, allow_not_found: bool = True) -> str:
         if allow_not_found else ""
     )
     return (
-        "You are a study assistant. Answer the question using ONLY the provided context.\n"
-        "Start with a single bold sentence that directly answers the question. Then, if helpful, add short bullet points. Do not start the response with a bullet.\n"
-        + cite_line +
-        "Important terms to anchor on: {terms}\n"
-        + nf_line +
-        "Use Conversation memory blocks only to resolve pronouns and maintain continuity; do NOT cite Conversation memory or Long‑term memory as sources. Citations must come from actual documents.\n\n"
-        "Question:\n{q}\n\nContext:\n{ctx}\n"
+            "You are a study assistant. Answer the question using ONLY the provided context.\n"
+            "Start with a single bold sentence that directly answers the question. Then, if helpful, add short bullet points. Do not start the response with a bullet.\n"
+            + cite_line +
+            "Important terms to anchor on: {terms}\n"
+            + nf_line +
+            "Use Conversation memory blocks only to resolve pronouns and maintain continuity; do NOT cite Conversation memory or Long‑term memory as sources. Citations must come from actual documents.\n\n"
+            "Question:\n{q}\n\nContext:\n{ctx}\n"
     )
 
 TEMPLATE = _template_body(ASK_INLINE_CITATIONS, allow_not_found=True)
@@ -1261,7 +1261,8 @@ def summarize(question, top_chunks, history=None, *, allow_not_found: bool = Tru
             + nf_clause +
             "Resolve pronouns and references (e.g., 'it', 'they', 'the two') using any Conversation memory blocks present in the Context. "
             "Do not cite Conversation memory or Long‑term memory; cite only document sources. "
-            "Be thorough and structured: include short section headings and clear bullet lists; aim for a detailed answer (≈180–350 words) unless asked for brevity."
+            "Prioritize a thorough, evidence-grounded answer. DO NOT include a 'Next steps' section - that will be generated separately. "
+            "Use short section headings, clear bullet lists, and aim for a detailed answer (≈180–400 words) unless asked for brevity."
         ) + (" " + prefs if prefs else "")
         messages = [{"role": "system", "content": sysmsg}]
         if history:
@@ -1286,6 +1287,7 @@ def summarize(question, top_chunks, history=None, *, allow_not_found: bool = Tru
         full = (
             f"System: You extract key ideas from the provided context only. Return Markdown for prose {citeline}typeset all math in LaTeX using $...$ / $$...$$. "
             + nf_clause
+            + " Prioritize a thorough, evidence-grounded answer. DO NOT include a 'Next steps' section - that will be generated separately. Use short section headings and clear bullet lists."
         ) + hist + "\n" + prompt + "\nAssistant:"
         text = _normalize_md(_hf_generate(full, max_new_tokens=700))
         text = _clean_math_citations(text)
@@ -1389,13 +1391,19 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
     if cfg.get("OPENAI_API_KEY"):
         prefs = _pref_string()
         nf_clause = ("If the context is insufficient, reply exactly: I couldn't find relevant information in your documents. " if allow_not_found else "")
-        sysmsg = (
-            "You extract key ideas and cite pages. "
-            + nf_clause +
+        sys_parts = []
+        sys_parts.append("You extract key ideas and cite pages. ")
+        if nf_clause:
+            sys_parts.append(nf_clause)
+        sys_parts.append(
             "Respect conversational context: resolve pronouns and follow‑ups (e.g., 'it', 'they', 'the two', named people) using the most recent Conversation memory in Context; do not switch topics. "
-            + (" STRICT EXTRACTIVE MODE: copy or minimally paraphrase; do not add content beyond the context. " if strict_docs else "")
-            + "Write a clear, professional answer with short headings and concise bullets when helpful."
-        ) + (" " + prefs if prefs else "")
+        )
+        if strict_docs:
+            sys_parts.append("STRICT EXTRACTIVE MODE: copy or minimally paraphrase; do not add content beyond the context. ")
+        sys_parts.append(
+            "Provide a thorough, evidence-backed answer. DO NOT include a 'Next steps' section - that will be generated separately. Use short headings and concise bullets."
+        )
+        sysmsg = "".join(sys_parts) + (" " + prefs if prefs else "")
         hist_msgs = []
         if history:
             for turn in history[-8:]:
@@ -1498,6 +1506,7 @@ def summarize_batched(question, chunks, history=None, progress_cb=None, max_batc
                 + nf_clause +
                 " Respect conversational context: resolve pronouns and follow‑ups using Conversation memory; never cite Conversation memory or Long‑term memory — cite only document sources."
                 + (" STRICT EXTRACTIVE MODE: copy or minimally paraphrase; do not add content beyond the context." if strict_docs else "")
+                + " Provide a thorough, evidence-backed answer. DO NOT include a 'Next steps' section - that will be generated separately. Use short headings and concise bullets."
             ) + hist + "\n" + prompt + "\nAssistant:"
             ans = _normalize_md(_hf_generate(full, max_new_tokens=600))
             parts.append(ans)
