@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Verification - Anagnosis</title>
+    <link rel="stylesheet" href="/static/app.css">
+    <style>
+        .verify-container {
+            max-width: 500px;
+            margin: 100px auto;
+            padding: 40px;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .verify-icon {
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+        .verify-icon.success { color: #10b981; }
+        .verify-icon.error { color: #ef4444; }
+        .verify-icon.loading { color: #6b7280; }
+        .verify-message {
+            font-size: 18px;
+            margin-bottom: 20px;
+            color: #374151;
+        }
+        .verify-detail {
+            font-size: 14px;
+            color: #6b7280;
+            margin-bottom: 30px;
+        }
+        .btn-primary {
+            background-color: #5b7dff;
+            color: white;
+            padding: 12px 30px;
+            border-radius: 6px;
+            text-decoration: none;
+            display: inline-block;
+            font-weight: 500;
+        }
+        .btn-primary:hover {
+            background-color: #4a6de5;
+        }
+        .spinner {
+            border: 3px solid #f3f4f6;
+            border-top: 3px solid #5b7dff;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; margin: 0;">
+    <div class="verify-container">
+        <div id="loading-state">
+            <div class="spinner"></div>
+            <div class="verify-message">Verifying your email...</div>
+        </div>
+        
+        <div id="success-state" style="display: none;">
+            <div class="verify-icon success">✓</div>
+            <div class="verify-message">Email Verified!</div>
+            <div class="verify-detail">Your email has been successfully verified. You can now log in to your account.</div>
+            <a href="/login" class="btn-primary">Go to Login</a>
+        </div>
+        
+        <div id="error-state" style="display: none;">
+            <div class="verify-icon error">✗</div>
+            <div class="verify-message">Verification Failed</div>
+            <div class="verify-detail" id="error-detail">The verification link is invalid or has expired.</div>
+            <a href="/login" class="btn-primary">Go to Login</a>
+        </div>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const token = urlParams.get('token');
+        
+        if (!token) {
+            showError('No verification token provided');
+        } else {
+            verifyEmail(token);
+        }
+        
+        async function verifyEmail(token) {
+            try {
+                const response = await fetch('/api/auth/verify-email', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `token=${encodeURIComponent(token)}`
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showSuccess();
+                } else {
+                    showError(data.detail || 'Verification failed');
+                }
+            } catch (error) {
+                showError('Network error. Please try again.');
+            }
+        }
+        
+        function showSuccess() {
+            document.getElementById('loading-state').style.display = 'none';
+            document.getElementById('success-state').style.display = 'block';
+        }
+        
+        function showError(message) {
+            document.getElementById('loading-state').style.display = 'none';
+            document.getElementById('error-detail').textContent = message;
+            document.getElementById('error-state').style.display = 'block';
+        }
+    </script>
+</body>
+</html>

@@ -42,9 +42,11 @@ class User(Base):
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     email = Column(String(255), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
+    email_verified = Column(String(10), default="false", nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     sessions = relationship("Session", back_populates="user", cascade="all, delete-orphan")
+    verification_tokens = relationship("EmailVerificationToken", back_populates="user", cascade="all, delete-orphan")
 
 class Session(Base):
     __tablename__ = "sessions"
@@ -56,6 +58,21 @@ class Session(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     user = relationship("User", back_populates="sessions")
+    
+    @property
+    def is_valid(self):
+        return datetime.utcnow() < self.expires_at
+
+class EmailVerificationToken(Base):
+    __tablename__ = "email_verification_tokens"
+    
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
+    token = Column(String(100), unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    user = relationship("User", back_populates="verification_tokens")
     
     @property
     def is_valid(self):
