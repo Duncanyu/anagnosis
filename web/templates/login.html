@@ -166,7 +166,14 @@
                     window.location.href = '/';
                 } else {
                     const data = await response.json();
-                    errorMsg.textContent = data.detail || 'Login failed';
+                    let errorText = data.detail || 'Login failed';
+                    
+                    // Show resend link if email not verified
+                    if (response.status === 403 && errorText.includes('verify')) {
+                        errorText += ' <a href="#" onclick="resendVerification(\'' + email + '\'); return false;" style="color: #667eea; font-weight: 600;">Resend verification email</a>';
+                    }
+                    
+                    errorMsg.innerHTML = errorText;
                     errorMsg.classList.add('show');
                 }
             } catch (err) {
@@ -177,6 +184,26 @@
                 submitBtn.textContent = 'Sign In';
             }
         });
+        
+        async function resendVerification(email) {
+            try {
+                const response = await fetch(`${AUTH_BASE}/resend-verification`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email })
+                });
+                
+                if (response.ok) {
+                    errorMsg.textContent = 'Verification email sent! Please check your inbox.';
+                    errorMsg.style.background = '#efe';
+                    errorMsg.style.color = '#060';
+                } else {
+                    errorMsg.textContent = 'Could not resend verification email. Please try again.';
+                }
+            } catch (err) {
+                errorMsg.textContent = 'Network error. Please try again.';
+            }
+        }
     </script>
 </body>
 </html>

@@ -1025,6 +1025,12 @@ async def signup_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("signup.html", {"request": request})
 
 
+@app.get("/verify-email", response_class=HTMLResponse)
+async def verify_email_page(request: Request) -> HTMLResponse:
+    """Serve the email verification page."""
+    return templates.TemplateResponse("verify_email.html", {"request": request})
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
     """Main application page - requires authentication."""

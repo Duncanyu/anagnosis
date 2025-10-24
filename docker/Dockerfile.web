@@ -19,5 +19,5 @@ COPY . /app
 
 EXPOSE 7860
 
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "1", "-b", "0.0.0.0:7860", "web.app:app"]
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "2", "-b", "0.0.0.0:7860", "--timeout", "120", "web.app:app"]
 
