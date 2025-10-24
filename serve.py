@@ -6,6 +6,10 @@ Start with:
 
 On Render, set the Start Command to the above.
 """
+# Load .env file before anything else
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI
 
 # Import the Web UI app

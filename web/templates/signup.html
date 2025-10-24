@@ -130,7 +130,7 @@
         
         <div class="error-message" id="error-message"></div>
         <div class="success-message" id="success-message">
-            Account created! Please check your email to verify your account.
+            Account created! Please check your email to verify your account. Redirecting you back to log in...
         </div>
         
         <form id="signup-form">
@@ -199,9 +199,12 @@
                 });
                 
                 if (response.ok) {
-                    successMsg.classList.add('show');
+                    // Hide form and show success
                     form.style.display = 'none';
-                    // Redirect after 5 seconds or let user manually go to login
+                    document.querySelector('.alt-action').style.display = 'none';
+                    successMsg.classList.add('show');
+                    
+                    // Redirect after 5 seconds
                     setTimeout(() => {
                         window.location.href = '/login';
                     }, 5000);
@@ -213,6 +216,7 @@
                     submitBtn.textContent = 'Create Account';
                 }
             } catch (err) {
+                console.error('Signup error:', err);
                 errorMsg.textContent = 'Network error. Please try again.';
                 errorMsg.classList.add('show');
                 submitBtn.disabled = false;
