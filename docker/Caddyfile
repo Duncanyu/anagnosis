@@ -6,9 +6,15 @@
 {$DOMAIN} {
   encode zstd gzip
 
-  @api path /api*
-  reverse_proxy @api api:8000
-  reverse_proxy web:7860
+  # Route API traffic explicitly; strip the /api prefix for upstream
+  handle_path /api* {
+    reverse_proxy api:8000
+  }
+
+  # Everything else goes to the web UI
+  handle {
+    reverse_proxy web:7860
+  }
 
   header /* {
     X-Frame-Options DENY
