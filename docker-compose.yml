@@ -1,4 +1,4 @@
-version: '3.9'
+version: '3.8'
 
 services:
   postgres:
@@ -9,6 +9,7 @@ services:
       POSTGRES_DB: anagnosis
     volumes:
       - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
 
   api:
     build:
@@ -16,10 +17,14 @@ services:
       dockerfile: docker/Dockerfile.api
     env_file:
       - .env
+    environment:
+      # Fallback if not provided in .env
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://anag:anag@postgres:5432/anagnosis}
     volumes:
       - ./artifacts:/app/artifacts
     depends_on:
       - postgres
+    restart: unless-stopped
 
   web:
     build:
@@ -31,16 +36,26 @@ services:
       - ./artifacts:/app/artifacts
     depends_on:
       - api
+    restart: unless-stopped
 
-  nginx:
-    image: nginx:alpine
+  caddy:
+    image: caddy:2-alpine
     ports:
-      - "8080:80"
+      - "80:80"
+      - "443:443"
+    environment:
+      # Used by docker/Caddyfile via {$DOMAIN}
+      DOMAIN: ${DOMAIN}
     volumes:
-      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
     depends_on:
       - api
       - web
+    restart: unless-stopped
 
 volumes:
   pgdata:
+  caddy-data:
+  caddy-config:
