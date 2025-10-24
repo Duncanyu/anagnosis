@@ -1157,6 +1157,9 @@ function startIngestPoll(jobId) {
   if (!jobId) return;
   clearIngestPoll(jobId);
 
+  let lastUpdate = Date.now();
+  let staleWarningShown = false;
+
   const poll = async () => {
     try {
       const resp = await fetch(`${API_BASE}/ingest/status/${jobId}`, { credentials: 'include' });
@@ -1170,6 +1173,29 @@ function startIngestPoll(jobId) {
         return;
       }
       const data = await resp.json();
+      
+      // Check for stale updates (backend might be stuck on a heavy operation)
+      const serverLastUpdate = Number(data.last_update || 0) * 1000; // Convert to ms
+      const now = Date.now();
+      const timeSinceUpdate = now - Math.max(lastUpdate, serverLastUpdate);
+      
+      // If no update for 30+ seconds, show a processing indicator
+      if (timeSinceUpdate > 30000 && !staleWarningShown && data.status === 'running') {
+        const logs = Array.isArray(data.logs) ? data.logs : [];
+        const lastLog = logs[logs.length - 1] || '';
+        if (lastLog && !lastLog.includes('(processing large page)')) {
+          ingestLog.textContent += '\n⏳ Processing large page, this may take a few minutes...';
+          scrollIngestToBottom();
+          staleWarningShown = true;
+        }
+      }
+      
+      // Reset stale warning if we get a new update
+      if (serverLastUpdate > lastUpdate) {
+        lastUpdate = serverLastUpdate;
+        staleWarningShown = false;
+      }
+      
       if (Array.isArray(data.logs)) {
         ingestLog.textContent = data.logs.join('\n');
         scrollIngestToBottom();
@@ -1199,7 +1225,8 @@ function startIngestPoll(jobId) {
       const statusEl = document.getElementById('upload-progress-status');
       if (statusEl) {
         if (pagesTotal > 0 && pctReported <= 50) {
-          statusEl.textContent = `Parsing… ${Math.round(pctDisplay)}%  (${pagesDone} / ${pagesTotal} pages)`;
+          const processing = timeSinceUpdate > 15000 ? ' 🔄' : '';
+          statusEl.textContent = `Parsing… ${Math.round(pctDisplay)}%  (${pagesDone} / ${pagesTotal} pages)${processing}`;
         } else if (pctReported > 50 && pctReported < 100) {
           statusEl.textContent = `Indexing and embedding… ${Math.round(pctDisplay)}%`;
         } else if (pctReported >= 100) {

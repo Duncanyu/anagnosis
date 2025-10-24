@@ -68,6 +68,7 @@ def _append_log(job_id: str, message: str) -> None:
         job = INGEST_JOBS.get(job_id)
         if job is not None:
             job.setdefault("logs", []).append(message)
+            job["last_update"] = time.time()  # Track last activity
 
 
 def _start_ingest_job(
@@ -86,6 +87,7 @@ def _start_ingest_job(
         "details_html": "",
         "error": None,
         "user_id": str(user_id),
+        "last_update": time.time(),  # Track last activity
     }
     with INGEST_LOCK:
         INGEST_JOBS[job_id] = job_info
@@ -127,11 +129,11 @@ def _start_ingest_job(
                         job["status"] = "error"
                         job["error"] = "Missing OpenAI API key"
                 return
-            # Hard timeout (Phase 4): default 10 minutes
+            # Hard timeout (Phase 4): default 30 minutes for large documents
             try:
-                tout = float(os.environ.get("INGEST_TIMEOUT_SEC", "600"))
+                tout = float(os.environ.get("INGEST_TIMEOUT_SEC", "1800"))
             except Exception:
-                tout = 600.0
+                tout = 1800.0
             deadline = time.time() + max(30.0, tout)
 
             def should_cancel() -> bool:
@@ -290,6 +292,7 @@ def _ingest_job_payload(job_id: str, user_id: str) -> Dict[str, Any]:
             "summary_html": job.get("summary_html"),
             "details_html": job.get("details_html"),
             "error": job.get("error"),
+            "last_update": job.get("last_update", 0),  # Include timestamp
         }
 
 
