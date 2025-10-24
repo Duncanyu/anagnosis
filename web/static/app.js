@@ -2462,10 +2462,12 @@ async function performAction(action_id, params) {
             }
             
             if (st.answer) {
-              const botMessageEl = appendBotMessage(st.answer);
+              // Render markdown to HTML before displaying
+              const answerHtml = renderMarkdownToHtml(st.answer_markdown || st.answer);
+              const botMessageEl = appendBotMessage(answerHtml);
               try {
                 const qForSave = (window.__pendingActionQuestion || payload.question || question || '').trim();
-                updateOrRecord(qForSave, st.answer || '', st.answer_markdown || '');
+                updateOrRecord(qForSave, answerHtml || '', st.answer_markdown || st.answer || '');
                 try { window.__pendingActionQuestion = null; } catch {}
               } catch {}
               try { maybeRenderActions(st.actions || [], st.next_steps || [], botMessageEl); } catch {}
@@ -2734,10 +2736,12 @@ async function performAction(action_id, params) {
     
     // If server returned a new answer, append it
     if (data.answer) {
-      var botMessageEl = appendBotMessage(data.answer);
+      // Render markdown to HTML before displaying
+      const answerHtml = renderMarkdownToHtml(data.answer_markdown || data.answer);
+      var botMessageEl = appendBotMessage(answerHtml);
       try {
         const qForSave = (window.__pendingActionQuestion || payload.question || question || '').trim();
-        updateOrRecord(qForSave, data.answer || '', data.answer_markdown || '');
+        updateOrRecord(qForSave, answerHtml || '', data.answer_markdown || data.answer || '');
         try { window.__pendingActionQuestion = null; } catch {}
       } catch {}
       // Add PDF export button if this was a formula sheet action
@@ -2865,7 +2869,9 @@ async function askQuestion(payload, question) {
         try { console.log('[UI] Actions received:', d.actions); } catch {}
         try { console.log('[UI] Next steps received:', d.next_steps); } catch {}
         if (d.answer) {
-          const botMessageEl = appendBotMessage(d.answer);
+          // Render markdown to HTML before displaying
+          const answerHtml = renderMarkdownToHtml(d.answer_markdown || d.answer);
+          const botMessageEl = appendBotMessage(answerHtml);
           // Wait for DOM update before attaching actions
           setTimeout(() => {
             try { 
@@ -2973,7 +2979,9 @@ async function askQuestion(payload, question) {
               const d = await direct.json();
               if (askLog) { askLog.textContent = d.log || 'Ready.'; try { askLog.scrollTop = askLog.scrollHeight; } catch {} }
               if (d.answer) {
-                appendBotMessage(d.answer);
+                // Render markdown to HTML before displaying
+                const answerHtml = renderMarkdownToHtml(d.answer_markdown || d.answer);
+                appendBotMessage(answerHtml);
               }
               if (question) {
                 recordConversationEntry(question, d.answer || '', d.answer_markdown, pendingUserHtml || null);
@@ -3013,7 +3021,9 @@ async function askQuestion(payload, question) {
         try { console.log('[UI] Next steps received:', st.next_steps); } catch {}
         try { console.log('[UI] Next steps is array?', Array.isArray(st.next_steps), 'length:', st.next_steps?.length); } catch {}
         if (st.answer) {
-          const botMessageEl = appendBotMessage(st.answer);
+          // Render markdown to HTML before displaying
+          const answerHtml = renderMarkdownToHtml(st.answer_markdown || st.answer);
+          const botMessageEl = appendBotMessage(answerHtml);
           try { 
             // Actions and next_steps are at the top level of st, not nested in result
             const actionsToRender = st.actions || [];
