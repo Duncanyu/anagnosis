@@ -24,6 +24,11 @@ services:
       - ./artifacts:/app/artifacts
     depends_on:
       - postgres
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/healthz').getcode()==200 else sys.exit(1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped
 
   web:
@@ -36,6 +41,11 @@ services:
       - ./artifacts:/app/artifacts
     depends_on:
       - api
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:7860/healthz').getcode()==200 else sys.exit(1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped
 
   caddy:
@@ -51,8 +61,10 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     depends_on:
-      - api
-      - web
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
