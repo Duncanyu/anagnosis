@@ -914,6 +914,38 @@ html, body { scrollbar-width: none; -ms-overflow-style: none }
               </div>
             </div>
             <div class="settings-card">
+              <h3>Create Verified User</h3>
+              <div class="field">
+                <label for="dev-user-email">Email</label>
+                <input id="dev-user-email" type="email" placeholder="user@example.com" />
+              </div>
+              <div class="field">
+                <label for="dev-user-password">Password</label>
+                <input id="dev-user-password" type="password" placeholder="At least 8 chars" />
+              </div>
+              <div class="settings-footer">
+                <button type="button" id="dev-create-user">Create User (bypasses verification)</button>
+              </div>
+              <div id="dev-user-result" style="margin-top:8px; font-size:.9rem; padding:8px; border-radius:4px; display:none;"></div>
+            </div>
+            <div class="settings-card">
+              <h3>User Management</h3>
+              <div class="field">
+                <label for="dev-manage-email">Email</label>
+                <input id="dev-manage-email" type="email" placeholder="user@example.com" />
+              </div>
+              <div class="settings-footer">
+                <button type="button" id="dev-delete-user" class="danger">Delete User</button>
+                <button type="button" id="dev-ban-email" class="danger">Ban Email</button>
+                <button type="button" id="dev-unban-email">Unban Email</button>
+              </div>
+              <div id="dev-manage-result" style="margin-top:8px; font-size:.9rem; padding:8px; border-radius:4px; display:none;"></div>
+              <details style="margin-top:12px;">
+                <summary style="cursor:pointer; font-weight:600;">Banned Emails</summary>
+                <pre id="dev-banned-list" style="margin-top:8px; max-height:150px; overflow:auto; font-size:.85rem;"></pre>
+              </details>
+            </div>
+            <div class="settings-card">
               <h3>Admin Console</h3>
               <div class="field">
                 <label for="dev-console-input">Command</label>

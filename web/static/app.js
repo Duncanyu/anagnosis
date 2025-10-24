@@ -3906,6 +3906,228 @@ function initDevTools() {
     await callAdmin('purge_all_libraries');
     try { await refreshLibrary(); } catch {}
   });
+  
+  // Create verified user
+  document.getElementById('dev-create-user')?.addEventListener('click', async () => {
+    const emailEl = document.getElementById('dev-user-email');
+    const passEl = document.getElementById('dev-user-password');
+    const resultEl = document.getElementById('dev-user-result');
+    
+    const email = emailEl?.value?.trim();
+    const password = passEl?.value;
+    
+    if (!email || !password) {
+      if (resultEl) {
+        resultEl.textContent = 'Email and password required';
+        resultEl.style.display = 'block';
+        resultEl.style.background = '#fee';
+        resultEl.style.color = '#c00';
+      }
+      return;
+    }
+    
+    try {
+      const response = await fetch(`${API_BASE}/admin/create_verified_user?email=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`, {
+        method: 'POST',
+        credentials: 'include'
+      });
+      
+      const data = await response.json();
+      
+      if (response.ok) {
+        if (resultEl) {
+          resultEl.textContent = `✓ User created: ${data.user.email} (verified)`;
+          resultEl.style.display = 'block';
+          resultEl.style.background = '#efe';
+          resultEl.style.color = '#060';
+        }
+        if (emailEl) emailEl.value = '';
+        if (passEl) passEl.value = '';
+      } else {
+        if (resultEl) {
+          resultEl.textContent = `Error: ${data.detail || 'Failed to create user'}`;
+          resultEl.style.display = 'block';
+          resultEl.style.background = '#fee';
+          resultEl.style.color = '#c00';
+        }
+      }
+    } catch (err) {
+      if (resultEl) {
+        resultEl.textContent = `Network error: ${err}`;
+        resultEl.style.display = 'block';
+        resultEl.style.background = '#fee';
+        resultEl.style.color = '#c00';
+      }
+    }
+  });
+  
+  // Delete user
+  document.getElementById('dev-delete-user')?.addEventListener('click', async () => {
+    const emailEl = document.getElementById('dev-manage-email');
+    const resultEl = document.getElementById('dev-manage-result');
+    const email = emailEl?.value?.trim();
+    
+    if (!email) {
+      if (resultEl) {
+        resultEl.textContent = 'Email required';
+        resultEl.style.display = 'block';
+        resultEl.style.background = '#fee';
+        resultEl.style.color = '#c00';
+      }
+      return;
+    }
+    
+    if (!confirm(`Delete user ${email} and all their data?`)) return;
+    
+    try {
+      const response = await fetch(`${API_BASE}/admin/delete_user?email=${encodeURIComponent(email)}`, {
+        method: 'POST',
+        credentials: 'include'
+      });
+      const data = await response.json();
+      if (response.ok) {
+        if (resultEl) {
+          resultEl.textContent = `✓ ${data.message}`;
+          resultEl.style.display = 'block';
+          resultEl.style.background = '#efe';
+          resultEl.style.color = '#060';
+        }
+        if (emailEl) emailEl.value = '';
+      } else {
+        if (resultEl) {
+          resultEl.textContent = `Error: ${data.detail || 'Failed'}`;
+          resultEl.style.display = 'block';
+          resultEl.style.background = '#fee';
+          resultEl.style.color = '#c00';
+        }
+      }
+    } catch (err) {
+      if (resultEl) {
+        resultEl.textContent = `Network error: ${err}`;
+        resultEl.style.display = 'block';
+        resultEl.style.background = '#fee';
+        resultEl.style.color = '#c00';
+      }
+    }
+  });
+  
+  // Ban email
+  document.getElementById('dev-ban-email')?.addEventListener('click', async () => {
+    const emailEl = document.getElementById('dev-manage-email');
+    const resultEl = document.getElementById('dev-manage-result');
+    const email = emailEl?.value?.trim();
+    
+    if (!email) {
+      if (resultEl) {
+        resultEl.textContent = 'Email required';
+        resultEl.style.display = 'block';
+        resultEl.style.background = '#fee';
+        resultEl.style.color = '#c00';
+      }
+      return;
+    }
+    
+    if (!confirm(`Ban ${email} from signing up?`)) return;
+    
+    try {
+      const response = await fetch(`${API_BASE}/admin/ban_email?email=${encodeURIComponent(email)}`, {
+        method: 'POST',
+        credentials: 'include'
+      });
+      const data = await response.json();
+      if (response.ok) {
+        if (resultEl) {
+          resultEl.textContent = `✓ ${data.message}`;
+          resultEl.style.display = 'block';
+          resultEl.style.background = '#efe';
+          resultEl.style.color = '#060';
+        }
+        if (emailEl) emailEl.value = '';
+        loadBannedEmails();
+      } else {
+        if (resultEl) {
+          resultEl.textContent = `Error: ${data.detail || 'Failed'}`;
+          resultEl.style.display = 'block';
+          resultEl.style.background = '#fee';
+          resultEl.style.color = '#c00';
+        }
+      }
+    } catch (err) {
+      if (resultEl) {
+        resultEl.textContent = `Network error: ${err}`;
+        resultEl.style.display = 'block';
+        resultEl.style.background = '#fee';
+        resultEl.style.color = '#c00';
+      }
+    }
+  });
+  
+  // Unban email
+  document.getElementById('dev-unban-email')?.addEventListener('click', async () => {
+    const emailEl = document.getElementById('dev-manage-email');
+    const resultEl = document.getElementById('dev-manage-result');
+    const email = emailEl?.value?.trim();
+    
+    if (!email) {
+      if (resultEl) {
+        resultEl.textContent = 'Email required';
+        resultEl.style.display = 'block';
+        resultEl.style.background = '#fee';
+        resultEl.style.color = '#c00';
+      }
+      return;
+    }
+    
+    try {
+      const response = await fetch(`${API_BASE}/admin/unban_email?email=${encodeURIComponent(email)}`, {
+        method: 'POST',
+        credentials: 'include'
+      });
+      const data = await response.json();
+      if (response.ok) {
+        if (resultEl) {
+          resultEl.textContent = `✓ ${data.message}`;
+          resultEl.style.display = 'block';
+          resultEl.style.background = '#efe';
+          resultEl.style.color = '#060';
+        }
+        if (emailEl) emailEl.value = '';
+        loadBannedEmails();
+      } else {
+        if (resultEl) {
+          resultEl.textContent = `Error: ${data.detail || 'Failed'}`;
+          resultEl.style.display = 'block';
+          resultEl.style.background = '#fee';
+          resultEl.style.color = '#c00';
+        }
+      }
+    } catch (err) {
+      if (resultEl) {
+        resultEl.textContent = `Network error: ${err}`;
+        resultEl.style.display = 'block';
+        resultEl.style.background = '#fee';
+        resultEl.style.color = '#c00';
+      }
+    }
+  });
+  
+  // Load banned emails
+  async function loadBannedEmails() {
+    const listEl = document.getElementById('dev-banned-list');
+    if (!listEl) return;
+    try {
+      const response = await fetch(`${API_BASE}/admin/banned_emails`, { credentials: 'include' });
+      const data = await response.json();
+      if (data.banned && data.banned.length > 0) {
+        listEl.textContent = data.banned.join('\n');
+      } else {
+        listEl.textContent = '(no banned emails)';
+      }
+    } catch {
+      listEl.textContent = '(error loading)';
+    }
+  }
+  loadBannedEmails();
   // (Removed) Attach sources helper; reingest instead
   // Update status initially and on a timer
   refreshAdminStatus();

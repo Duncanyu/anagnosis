@@ -213,8 +213,154 @@ def list_users(_: User = Depends(require_dev), db: Session = Depends(get_db)) ->
     """List users (id and email) for administrative diagnostics."""
     from api.db.models import User as DBUser
     users = db.query(DBUser).all()
-    data = [{"id": str(u.id), "email": u.email, "created_at": getattr(u, "created_at", None)} for u in users]
+    data = [{"id": str(u.id), "email": u.email, "email_verified": u.email_verified, "created_at": getattr(u, "created_at", None)} for u in users]
     return JSONResponse({"users": data})
+
+
+@router.post("/create_verified_user")
+def create_verified_user(email: str, password: str, _: User = Depends(require_dev), db: Session = Depends(get_db)) -> JSONResponse:
+    """Create a user account that bypasses email verification (for dev/testing)."""
+    from api.db.models import User as DBUser
+    from api.auth.security import get_password_hash, validate_password
+    
+    # Check if user exists
+    existing = db.query(DBUser).filter(DBUser.email == email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Validate password
+    is_valid, error_msg = validate_password(password)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error_msg)
+    
+    # Create verified user
+    hashed_password = get_password_hash(password)
+    user = DBUser(email=email, password_hash=hashed_password, email_verified="true")
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    
+    return JSONResponse({
+        "ok": True,
+        "user": {"id": str(user.id), "email": user.email, "email_verified": user.email_verified}
+    })
+
+
+@router.post("/delete_user")
+def delete_user(email: str, _: User = Depends(require_dev), db: Session = Depends(get_db)) -> JSONResponse:
+    """Delete a user account and all associated data."""
+    from api.db.models import User as DBUser
+    
+    user = db.query(DBUser).filter(DBUser.email == email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user_id = str(user.id)
+    
+    # Delete user's documents from indexes
+    try:
+        removed_docs = index_service.clear_documents_for_user(user_id)
+    except Exception:
+        removed_docs = 0
+    
+    # Delete user's memory
+    try:
+        mem_path = ART / f"memory_{user_id}.jsonl"
+        if mem_path.exists():
+            mem_path.unlink()
+    except Exception:
+        pass
+    
+    # Delete user from database (cascades to sessions and tokens)
+    db.delete(user)
+    db.commit()
+    
+    return JSONResponse({
+        "ok": True,
+        "email": email,
+        "documents_removed": removed_docs,
+        "message": "User and all associated data deleted"
+    })
+
+
+@router.get("/banned_emails")
+def get_banned_emails(_: User = Depends(require_dev)) -> JSONResponse:
+    """Get list of banned email addresses."""
+    banned_file = ART / "banned_emails.txt"
+    if not banned_file.exists():
+        return JSONResponse({"banned": []})
+    
+    try:
+        banned = [line.strip() for line in banned_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return JSONResponse({"banned": banned})
+    except Exception:
+        return JSONResponse({"banned": []})
+
+
+@router.post("/ban_email")
+def ban_email(email: str, _: User = Depends(require_dev), db: Session = Depends(get_db)) -> JSONResponse:
+    """Ban an email address from signing up. Optionally deletes existing user."""
+    from api.db.models import User as DBUser
+    
+    email = email.strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email required")
+    
+    # Add to ban list
+    banned_file = ART / "banned_emails.txt"
+    try:
+        existing_bans = set()
+        if banned_file.exists():
+            existing_bans = set(line.strip().lower() for line in banned_file.read_text(encoding="utf-8").splitlines() if line.strip())
+        
+        existing_bans.add(email)
+        banned_file.write_text("\n".join(sorted(existing_bans)) + "\n", encoding="utf-8")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to ban email: {e}")
+    
+    # Check if user exists and delete if so
+    user = db.query(DBUser).filter(DBUser.email == email).first()
+    deleted = False
+    if user:
+        try:
+            user_id = str(user.id)
+            index_service.clear_documents_for_user(user_id)
+            mem_path = ART / f"memory_{user_id}.jsonl"
+            if mem_path.exists():
+                mem_path.unlink()
+            db.delete(user)
+            db.commit()
+            deleted = True
+        except Exception:
+            pass
+    
+    return JSONResponse({
+        "ok": True,
+        "email": email,
+        "user_deleted": deleted,
+        "message": f"Email banned{' and user deleted' if deleted else ''}"
+    })
+
+
+@router.post("/unban_email")
+def unban_email(email: str, _: User = Depends(require_dev)) -> JSONResponse:
+    """Remove an email address from the ban list."""
+    email = email.strip().lower()
+    
+    banned_file = ART / "banned_emails.txt"
+    if not banned_file.exists():
+        return JSONResponse({"ok": True, "message": "Email was not banned"})
+    
+    try:
+        existing_bans = set(line.strip().lower() for line in banned_file.read_text(encoding="utf-8").splitlines() if line.strip())
+        if email in existing_bans:
+            existing_bans.remove(email)
+            banned_file.write_text("\n".join(sorted(existing_bans)) + "\n" if existing_bans else "", encoding="utf-8")
+            return JSONResponse({"ok": True, "message": "Email unbanned"})
+        else:
+            return JSONResponse({"ok": True, "message": "Email was not banned"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to unban email: {e}")
 
 
 @router.get("/usage")
