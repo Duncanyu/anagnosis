@@ -1243,7 +1243,8 @@ function startIngestPoll(jobId) {
         const convTitle = firstDoc?.name ? `Summary: ${firstDoc.name}` : 'Ingestion summary';
         createConversation(convTitle);
         const summaryHtml = data.summary_html || '<p>Ingestion complete.</p>';
-        appendBotMessage(summaryHtml, { animate: false });
+        // Note: backend sends pre-rendered HTML, but may contain LaTeX that needs MathJax
+        appendBotMessage(summaryHtml, { animate: false, typeset: true });
         recordConversationEntry('', summaryHtml, null, null);
         // Ask server to generate a concise title for this summary
         maybeUpdateTitleFrom(stripHTML(summaryHtml));
@@ -3595,7 +3596,7 @@ function loadConversation(id) {
     } else if (question) {
       lastEl = appendUserMessage(question, { scroll: false, animate: false });
     }
-    if (html) lastEl = appendBotMessage(html, { scroll: false, typeset: false, animate: false });
+    if (html) lastEl = appendBotMessage(html, { scroll: false, typeset: true, animate: false });
     normalized.push({ q: question, q_html: qhtml || null, a: markdown, a_markdown: markdown, a_html: html });
   }
   chatHistory.push(...normalized);
