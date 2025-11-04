@@ -69,7 +69,10 @@ def _embed_hf(texts, model_name, progress_cb=None):
 def embed_texts(texts, show_progress_bar=False, normalize_embeddings=True, progress_cb=None):
     cfg = load_config()
     backend = (cfg.get("EMBED_BACKEND") or "hf").lower()
+    openai_key = cfg.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if backend == "openai":
+        if not openai_key:
+            raise RuntimeError("OpenAI selected as embedder, but no OpenAI API key found.")
         model = cfg.get("OPENAI_EMBED_MODEL") or "text-embedding-3-small"
         batch_size = int(cfg.get("EMBED_BATCH") or 128)
         arr = _embed_openai(texts, model, batch_size, progress_cb=progress_cb)

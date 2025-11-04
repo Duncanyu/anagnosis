@@ -25,7 +25,22 @@ try:
 except Exception:
     mdlib = None
 
+# Check if Celery is available for async processing
+try:
+    from api.worker.tasks import ingest_document_task
+    CELERY_AVAILABLE = True
+except ImportError:
+    CELERY_AVAILABLE = False
+    ingest_document_task = None
+
 router = APIRouter(prefix="/api", tags=["ingest"])
+
+# Feature flag for async ingestion (default: enabled if Celery/Redis available)
+ASYNC_INGESTION_ENABLED = os.getenv("ASYNC_INGESTION_ENABLED", "auto").lower()
+if ASYNC_INGESTION_ENABLED == "auto":
+    ASYNC_INGESTION_ENABLED = CELERY_AVAILABLE
+else:
+    ASYNC_INGESTION_ENABLED = ASYNC_INGESTION_ENABLED in {"1", "true", "yes", "on"}
 
 
 def _md_to_html(md_text: str) -> str:
@@ -305,6 +320,10 @@ async def api_ingest(
         raise HTTPException(status_code=429, detail="Rate limit exceeded for ingest. Try again shortly.")
     if not files:
         raise HTTPException(status_code=400, detail="Upload one or more documents with text.")
+    
+    # Check if async mode is requested and available
+    use_async = ASYNC_INGESTION_ENABLED and len(files) == 1  # Currently only support single-file async
+    
     tmp_path = pathlib.Path(tempfile.mkdtemp(prefix="anag_upload_"))
     paths: List[pathlib.Path] = []
     names: List[str] = []
@@ -327,16 +346,130 @@ async def api_ingest(
         shutil.rmtree(tmp_path, ignore_errors=True)
         raise
 
+    # Async mode: Submit to Celery
+    if use_async and ingest_document_task:
+        try:
+            task = ingest_document_task.delay(
+                str(paths[0]),
+                str(user.id),
+                names[0]
+            )
+            try:
+                usage_service.record(str(user.id), "ingest")
+            except Exception:
+                pass
+            return JSONResponse({
+                "job_id": task.id,
+                "status": "queued",
+                "mode": "async",
+                "logs": [f"Document '{names[0]}' queued for background processing"],
+                "progress": 0,
+                "documents": [{"name": names[0], "pages": 0, "pages_total": 0, "pages_done": 0}],
+                "summary_html": "",
+                "details_html": "",
+                "error": None
+            })
+        except Exception as e:
+            # Fall back to sync mode if Celery submission fails
+            print(f"[INGEST] Celery submission failed: {e}, falling back to sync mode")
+            use_async = False
+
+    # Sync mode: Use existing thread-based implementation
     job_id = _start_ingest_job(paths, tmp_path, names, user_id=str(user.id))
     try:
         usage_service.record(str(user.id), "ingest")
     except Exception:
         pass
     payload = _ingest_job_payload(job_id, user_id=str(user.id))
+    payload["mode"] = "sync"
     return JSONResponse(payload)
 
 
 @router.get("/ingest/status/{job_id}")
 async def api_ingest_status(job_id: str, user: User = Depends(require_auth)) -> JSONResponse:
+    # Check if this is a Celery task ID (UUID format)
+    is_celery_task = CELERY_AVAILABLE and len(job_id) == 36 and "-" in job_id
+    
+    if is_celery_task:
+        try:
+            from celery.result import AsyncResult
+            from api.worker.celery_app import celery_app
+            
+            task = AsyncResult(job_id, app=celery_app)
+            
+            # Map Celery states to our format
+            status_map = {
+                "PENDING": "running",
+                "STARTED": "running",
+                "PROCESSING": "running",
+                "SUCCESS": "done",
+                "FAILURE": "error",
+                "RETRY": "running",
+                "REVOKED": "cancelled"
+            }
+            
+            status = status_map.get(task.state, "unknown")
+            
+            # Build response from task meta
+            if task.state == "PENDING":
+                payload = {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "mode": "async",
+                    "logs": ["Task queued, waiting to start..."],
+                    "progress": 0,
+                    "documents": [],
+                    "summary_html": "",
+                    "details_html": "",
+                    "error": None
+                }
+            elif task.state == "FAILURE":
+                error_info = task.info or {}
+                payload = {
+                    "job_id": job_id,
+                    "status": "error",
+                    "mode": "async",
+                    "logs": [f"Error: {error_info.get('error', 'Unknown error')}"],
+                    "progress": 0,
+                    "documents": [],
+                    "summary_html": "",
+                    "details_html": "",
+                    "error": error_info.get('error', 'Task failed')
+                }
+            elif task.state == "SUCCESS":
+                result = task.result or {}
+                payload = {
+                    "job_id": job_id,
+                    "status": "done",
+                    "mode": "async",
+                    "logs": ["Ingestion complete."],
+                    "progress": 100,
+                    "documents": [],
+                    "summary_html": _md_to_html(result.get("result", {}).get("doc_summary", "")),
+                    "details_html": _md_to_html(_format_ingest_details(result.get("result", {}).get("details", []))),
+                    "error": None
+                }
+            else:  # PROCESSING or other states
+                meta = task.info or {}
+                payload = {
+                    "job_id": job_id,
+                    "status": status,
+                    "mode": "async",
+                    "logs": [meta.get("status", "Processing...")],
+                    "progress": meta.get("progress", 0),
+                    "documents": [{"name": meta.get("filename", ""), "pages": 0, "pages_total": 0, "pages_done": 0}],
+                    "summary_html": "",
+                    "details_html": "",
+                    "error": None
+                }
+            
+            return JSONResponse(payload)
+        
+        except Exception as e:
+            print(f"[INGEST] Error checking Celery task status: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to check task status: {str(e)}")
+    
+    # Fall back to thread-based job lookup
     payload = _ingest_job_payload(job_id, user_id=str(user.id))
+    payload.setdefault("mode", "sync")
     return JSONResponse(payload)
