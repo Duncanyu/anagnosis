@@ -89,7 +89,12 @@ def _apply_pref_env(prefs: Dict[str, Any]) -> None:
         "ASK_TIME_BUDGET_SEC": 120,
         "ASK_MAX_BATCHES": 6,
         "ASK_BATCH_CHAR_BUDGET": 12000,
-        "ASK_CANDIDATES": 300,
+        "ASK_CANDIDATES": 150,
+        # New VM-friendly defaults
+        "RERANK_TOP_N": 80,
+        "ASK_MMR_CAP": 40,
+        "ASK_MMR_TIMEOUT": 3,
+        "SEARCH_TIMEOUT_SEC": 18,
     }
     for key, default in numeric_defaults.items():
         value = prefs.get(key) or os.environ.get(key) or default
@@ -130,7 +135,12 @@ def _settings_defaults_for_user(user_id: str) -> Dict[str, Any]:
         "ASK_TIME_BUDGET_SEC": int(prefs.get("ASK_TIME_BUDGET_SEC") or env.get("ASK_TIME_BUDGET_SEC", "120")),
         "ASK_EXHAUSTIVE": _bool(prefs.get("ASK_EXHAUSTIVE") or env.get("ASK_EXHAUSTIVE", "false")),
         "ASK_RERANKER": (prefs.get("ASK_RERANKER") or env.get("ASK_RERANKER", "off")).lower(),
-        "ASK_CANDIDATES": int(prefs.get("ASK_CANDIDATES") or env.get("ASK_CANDIDATES", "300")),
+        "ASK_CANDIDATES": int(prefs.get("ASK_CANDIDATES") or env.get("ASK_CANDIDATES", "150")),
+        # VM-friendly knobs (also respected if present)
+        "RERANK_TOP_N": int(prefs.get("RERANK_TOP_N") or env.get("RERANK_TOP_N", "80")),
+        "ASK_MMR_CAP": int(prefs.get("ASK_MMR_CAP") or env.get("ASK_MMR_CAP", "40")),
+        "ASK_MMR_TIMEOUT": int(prefs.get("ASK_MMR_TIMEOUT") or env.get("ASK_MMR_TIMEOUT", "3")),
+        "SEARCH_TIMEOUT_SEC": int(prefs.get("SEARCH_TIMEOUT_SEC") or env.get("SEARCH_TIMEOUT_SEC", "18")),
     }
 
 
@@ -279,7 +289,12 @@ def _save_settings_for_user(user_id: str, payload: Dict[str, Any]) -> str:
                 "ASK_TIME_BUDGET_SEC": int(payload.get("ask_time_budget", 120)),
                 "ASK_EXHAUSTIVE": "true" if payload.get("ask_exhaustive") else "false",
                 "ASK_RERANKER": (payload.get("ask_reranker") or "off").lower(),
-                "ASK_CANDIDATES": int(payload.get("ask_candidates", 300)),
+                "ASK_CANDIDATES": int(payload.get("ask_candidates", 150)),
+                # Optional advanced fields (ignored if not sent)
+                "RERANK_TOP_N": int(payload.get("rerank_top_n", 80)),
+                "ASK_MMR_CAP": int(payload.get("ask_mmr_cap", 40)),
+                "ASK_MMR_TIMEOUT": int(payload.get("ask_mmr_timeout", 3)),
+                "SEARCH_TIMEOUT_SEC": int(payload.get("search_timeout_sec", 18)),
             }
         )
         write_user_prefs(user_id, prefs)
@@ -317,6 +332,7 @@ def apply_env_for_user(user_id: str):
         "MEMORY_ENABLED","MEMORY_TOKEN_LIMIT","MEMORY_FILE_LIMIT_MB",
         "OPENAI_TPM","OPENAI_RPM","ASK_BATCH_CHAR_BUDGET","ASK_MAX_BATCHES",
         "ASK_TIME_BUDGET_SEC","ASK_EXHAUSTIVE","ASK_RERANKER","ASK_CANDIDATES","WEB_SEARCH_PROVIDER",
+        "RERANK_TOP_N","ASK_MMR_CAP","ASK_MMR_TIMEOUT","SEARCH_TIMEOUT_SEC",
         "OPENAI_API_KEY","SERPAPI_KEY","BRAVE_API_KEY",
     ]
     for k in keys:
@@ -332,6 +348,7 @@ def apply_env_for_user(user_id: str):
     for k in (
         "MEMORY_TOKEN_LIMIT","MEMORY_FILE_LIMIT_MB","OPENAI_TPM","OPENAI_RPM",
         "ASK_BATCH_CHAR_BUDGET","ASK_MAX_BATCHES","ASK_TIME_BUDGET_SEC","ASK_CANDIDATES",
+        "RERANK_TOP_N","ASK_MMR_CAP","ASK_MMR_TIMEOUT","SEARCH_TIMEOUT_SEC",
     ):
         os.environ[k] = str(defaults.get(k))
     for k in ("OPENAI_API_KEY","SERPAPI_KEY","BRAVE_API_KEY"):

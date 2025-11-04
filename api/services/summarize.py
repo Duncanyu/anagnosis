@@ -124,7 +124,7 @@ CTX_CHAR_BUDGET = 14000
 BATCH_CHAR_BUDGET = int(os.getenv("ASK_BATCH_CHAR_BUDGET", "12000"))
 MAX_BATCHES_DEFAULT = int(os.getenv("ASK_MAX_BATCHES", "6"))
 TIME_BUDGET_SEC_DEFAULT = int(os.getenv("ASK_TIME_BUDGET_SEC", "120"))
-MMR_TOP_N = int(os.getenv("ASK_MMR_TOP_N", "200"))
+MMR_TOP_N = int(os.getenv("ASK_MMR_TOP_N", "150"))
 MMR_ALPHA = float(os.getenv("ASK_MMR_ALPHA", "0.7"))
 MMR_ENABLE = (os.getenv("ASK_MMR_ENABLE", "1").lower() in {"1","true","yes","on"})
 ASK_EXHAUSTIVE_DEFAULT = (os.getenv("ASK_EXHAUSTIVE","0").lower() in {"1","true","yes","on"})
@@ -134,7 +134,8 @@ def _current_reranker_name():
         return os.getenv("ASK_RERANKER","off").lower()
     except Exception:
         return "off"
-RERANK_TOP_N = int(os.getenv("ASK_RERANK_TOP_N","200"))
+# Reduce reranker workload by default for VM-friendly performance
+RERANK_TOP_N = int(os.getenv("ASK_RERANK_TOP_N","80"))
 ASK_RERANK_IN_FORMULA = (os.getenv("ASK_RERANK_IN_FORMULA","1").lower() in {"1","true","yes","on"})
 FORMULA_EXHAUSTIVE = (os.getenv("FORMULA_EXHAUSTIVE", "1").lower() in {"1","true","yes","on"})
 FORMULA_MAX_PER_PAGE = int(os.getenv("FORMULA_MAX_PER_PAGE", "200"))
@@ -1178,8 +1179,9 @@ def _mmr_order(question, chs, top_n=MMR_TOP_N, alpha=MMR_ALPHA):
     """
     try:
         t0 = time.time()
-        timeout_s = float(os.getenv("ASK_MMR_TIMEOUT", "6"))
-        cap = max(5, int(os.getenv("ASK_MMR_CAP", "60")))
+        # Tighter defaults for timeout and cap on low-resource VMs
+        timeout_s = float(os.getenv("ASK_MMR_TIMEOUT", "3"))
+        cap = max(5, int(os.getenv("ASK_MMR_CAP", "40")))
         n = min(len(chs), top_n, cap)
         if n <= 2:
             return list(range(len(chs)))
