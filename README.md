@@ -38,7 +38,7 @@ Where to look
 
 Status
 
-Experimental — the repo contains working parsing, retrieval and UI components and is being actively developed.
+Experimental — the repo contains working parsing, retrieval and UI components and is being actively developed.	
 
 Contributing & contact
 
