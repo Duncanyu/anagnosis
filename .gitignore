@@ -37,6 +37,9 @@ qdrant_storage/
 weaviate_data/
 pgdata/
 
+# Ignore Azure publish profile files (they contain secrets)
+*.PublishSettings
+
 logs/
 *.log
 
