@@ -42,20 +42,40 @@ jobs:
         run: |
           python - <<'PY'
           import os, re, base64, urllib.request, sys
-          xml = os.environ['PUBLISH_PROFILE']
-          scm = re.search(r'scmUri="([^"]+)"', xml).group(1).rstrip('/')
-          user = re.search(r'userName="([^"]+)"', xml).group(1)
-          pwd  = re.search(r'userPWD="([^"]+)"', xml).group(1)
+          xml = os.environ.get('PUBLISH_PROFILE','').strip()
+          if len(xml) < 50:
+              print("Publish profile missing/empty. Check repo secret:", flush=True)
+              sys.exit(1)
+
+          # Pick the ZipDeploy profile block (most reliable for CI)
+          m = re.search(r'(<publishProfile[^>]*publishMethod="ZipDeploy"[^>]*/>)', xml)
+          tag = m.group(1) if m else xml  # fall back to the whole xml
+
+          def attr(name):
+              m = re.search(fr'{name}="([^"]+)"', tag)
+              return m.group(1) if m else None
+
+          user = attr('userName')
+          pwd  = attr('userPWD')
+          scm  = attr('scmUri')
+          publish_url = attr('publishUrl')
+
+          if not scm:
+              # Derive from publishUrl like "rag-api-func.scm.azurewebsites.net:443"
+              if not publish_url:
+                  print("No scmUri/publishUrl in profile. Is this the right secret/XML?", flush=True)
+                  sys.exit(1)
+              host = publish_url.split(':')[0]
+              scm = f'https://{host}'
+
+          if not (user and pwd):
+              print("Username/password missing in profile (are they REDACTED?). Reset & re-download the profile.", flush=True)
+              sys.exit(1)
+
           auth = base64.b64encode(f"{user}:{pwd}".encode()).decode()
-          req = urllib.request.Request(scm + '/api/settings', headers={'Authorization': f'Basic {auth}'})
+          req = urllib.request.Request(scm.rstrip('/') + '/api/settings',
+                                      headers={'Authorization': f'Basic {auth}'})
           with urllib.request.urlopen(req) as r:
               print("Kudu preflight HTTP", r.status)
               sys.exit(0 if r.status == 200 else 1)
           PY
-
-      - name: Deploy ${{ matrix.app_name }}
-        uses: Azure/functions-action@v1
-        with:
-          app-name: ${{ matrix.app_name }}
-          package: ${{ matrix.package_path }}
-          publish-profile: ${{ secrets[matrix.secret_name] }}
